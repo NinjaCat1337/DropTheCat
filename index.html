@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no">
+<title>Meow Drop · DropTheCat</title>
+<meta name="description" content="A cozy cat puzzle: slide the coloured holes under the cats of the same colour and drop them all in. No timer, no rush.">
+<meta name="color-scheme" content="light">
+<meta name="theme-color" content="#7FD1FF">
+<link rel="manifest" href="./manifest.webmanifest">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Meow Drop">
+<meta name="format-detection" content="telephone=no">
+<link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png">
+<link rel="icon" type="image/svg+xml" href="./icons/icon.svg">
+<link rel="preload" href="./fonts/nunito-latin-900-normal.woff2" as="font" type="font/woff2" crossorigin>
+<style>html,body{margin:0;height:100%;background:#93AEFC}</style>
+<link rel="stylesheet" href="./css/style.css">
+<script type="module" src="./src/main.js"></script>
+</head>
+<body>
+<div id="app" class="app" data-screen="home">
+  <canvas id="game" class="game-canvas" role="img" aria-label="Game board: drag a coloured hole under the cats of the same colour."></canvas>
+
+  <header id="topbar" class="topbar">
+    <button id="btn-home" class="icon-btn" type="button" aria-label="Back to the level map">
+      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 2.6 1.8 11.2a1.2 1.2 0 0 0 1.6 1.8l.8-.7V20a1.6 1.6 0 0 0 1.6 1.6h3.6v-5.4a1.6 1.6 0 0 1 1.6-1.6h2a1.6 1.6 0 0 1 1.6 1.6v5.4h3.6a1.6 1.6 0 0 0 1.6-1.6v-7.7l.8.7a1.2 1.2 0 0 0 1.6-1.8z"/></svg>
+    </button>
+    <div class="level-title"><span id="level-name">Level 1</span><span id="hard-badge" class="hard-badge" hidden>Hard</span></div>
+    <button id="btn-settings-game" class="icon-btn" type="button" aria-label="Settings">
+      <svg viewBox="-1 -1 26 26" aria-hidden="true" focusable="false"><path fill-rule="evenodd" d="M9.52 3.98L9.81 1.22L14.19 1.22L14.48 3.98L15.92 4.57L18.080 2.83L21.17 5.92L19.43 8.08L20.02 9.52L22.78 9.81L22.78 14.19L20.02 14.48L19.43 15.92L21.17 18.08L18.08 21.17L15.92 19.43L14.48 20.02L14.19 22.78L9.81 22.78L9.52 20.02L8.08 19.43L5.92 21.17L2.83 18.08L4.57 15.92L3.98 14.48L1.22 14.19L1.22 9.81L3.98 9.52L4.57 8.08L2.83 5.920L5.92 2.83L8.08 4.57ZM15.50 12a3.5 3.5 0 1 0 -7.00 0a3.5 3.5 0 1 0 7.00 0Z"/></svg>
+    </button>
+  </header>
+
+  <nav id="tools" class="tools" aria-label="Tools">
+    <button id="btn-undo" class="tool" type="button">
+      <span class="tool-face"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M10.2 3.6 2.6 9.8a.8.8 0 0 0 0 1.2l7.6 6.2a.6.6 0 0 0 1-.5v-3.6c4.6 0 7.7 1.3 10 5.1.3.5.9.3.9-.2-.6-6.4-4.4-10.2-10.9-10.6V4.1a.6.6 0 0 0-1-.5z"/></svg></span>
+      <span class="tool-label">Undo</span>
+    </button>
+    <button id="btn-restart" class="tool" type="button">
+      <span class="tool-face"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 2.2a.6.6 0 0 1 1 .5v1.6a8.5 8.5 0 1 1-9.4 6.3 1.4 1.4 0 0 1 2.7.7A5.7 5.7 0 1 0 13 7.2v1.6a.6.6 0 0 1-1 .5L8.3 6.2a.6.6 0 0 1 0-.9z"/></svg></span>
+      <span class="tool-label">Restart</span>
+    </button>
+    <button id="btn-hint" class="tool" type="button">
+      <span class="tool-face"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 1.8a7.2 7.2 0 0 0-4.3 13c.6.4.9 1.1.9 1.8v.6c0 .6.5 1.1 1.1 1.1h4.6c.6 0 1.1-.5 1.1-1.1v-.6c0-.7.3-1.4.9-1.8A7.2 7.2 0 0 0 12 1.8zM9.3 20.2h5.4v.6a1.9 1.9 0 0 1-1.9 1.9h-1.6a1.9 1.9 0 0 1-1.9-1.9z"/></svg></span>
+      <span class="tool-label">Hint</span>
+      <b class="badge" data-count="hint">0</b>
+    </button>
+    <button id="btn-treat" class="tool" type="button">
+      <span class="tool-face"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill-rule="evenodd" d="M3.6 12c2.6-3.9 6-5.6 9.5-5.6 3.3 0 5.9 2 7.9 5.6-2 3.6-4.6 5.6-7.9 5.6-3.5 0-6.9-1.7-9.5-5.6zM3.6 12 .9 8.2c-.3-.4.1-1 .6-.8l4 1.5zm0 0-2.7 3.8c-.3.4.1 1 .6.8l4-1.5zM16.4 9.6a1.3 1.3 0 1 0 0 2.6 1.3 1.3 0 0 0 0-2.6z"/></svg></span>
+      <span class="tool-label">Treat</span>
+      <b class="badge" data-count="treat">0</b>
+    </button>
+  </nav>
+
+  <div id="tip" class="tip" role="status" aria-live="polite" hidden></div>
+
+  <section id="home" class="home" aria-label="Meow Drop">
+    <div class="home-bar">
+      <div class="coin-pill" aria-label="Coins"><i class="coin" aria-hidden="true"></i><span data-coins>0</span></div>
+      <button id="btn-settings" class="icon-btn" type="button" aria-label="Settings">
+        <svg viewBox="-1 -1 26 26" aria-hidden="true" focusable="false"><path fill-rule="evenodd" d="M9.52 3.98L9.81 1.22L14.19 1.22L14.48 3.98L15.92 4.57L18.08 2.83L21.17 5.92L19.43 8.08L20.02 9.52L22.78 9.81L22.78 14.19L20.02 14.48L19.43 15.92L21.17 18.08L18.08 21.17L15.92 19.43L14.48 20.02L14.19 22.78L9.81 22.78L9.52 20.02L8.08 19.43L5.92 21.17L2.83 18.08L4.57 15.92L3.98 14.48L1.22 14.19L1.22 9.81L3.98 9.52L4.57 8.08L2.83 5.92L5.92 2.83L8.08 4.57ZM15.50 12a3.5 3.5 0 1 0 -7.00 0a3.5 3.5 0 1 0 7.00 0Z"/></svg>
+      </button>
+    </div>
+    <h1 class="logo"><span>Meow</span><span>Drop</span></h1>
+    <canvas id="home-cats" class="home-cats" aria-hidden="true"></canvas>
+    <ol id="trail" class="trail" aria-label="Levels"></ol>
+    <button id="btn-play" class="big-btn play-btn" type="button">Level 1</button>
+    <p class="home-note">No timer. Take your time, meow.</p>
+  </section>
+
+  <section id="win" class="overlay" hidden>
+    <div class="card win-card" role="dialog" aria-modal="true" aria-labelledby="win-title">
+      <canvas id="win-cat" class="win-cat" aria-hidden="true"></canvas>
+      <h2 id="win-title" class="win-title">Purrfect!</h2>
+      <p class="win-sub">Level 1 complete</p>
+      <div class="reward"><i class="coin" aria-hidden="true"></i><span class="reward-value">+10</span></div>
+      <button id="btn-next" class="big-btn" type="button">Next</button>
+    </div>
+  </section>
+
+  <section id="stuck" class="overlay" hidden>
+    <div class="card" role="dialog" aria-modal="true" aria-labelledby="stuck-title">
+      <h2 id="stuck-title">No moves left</h2>
+      <p>No hole can reach a cat of its colour any more. Undo a few moves or start over.</p>
+      <div class="row">
+        <button id="btn-stuck-undo" class="btn" type="button">Undo</button>
+        <button id="btn-stuck-restart" class="btn btn-green" type="button">Restart</button>
+      </div>
+    </div>
+  </section>
+
+  <section id="buy" class="overlay" hidden>
+    <div class="card" role="dialog" aria-modal="true" aria-labelledby="buy-title">
+      <h2 id="buy-title">Get a hint?</h2>
+      <p class="buy-text"></p>
+      <div class="row">
+        <button id="btn-buy" class="btn btn-green" type="button">Buy</button>
+        <button id="btn-buy-cancel" class="btn btn-ghost" type="button">Not now</button>
+      </div>
+    </div>
+  </section>
+
+  <section id="settings" class="overlay" hidden>
+    <div class="card" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+      <h2 id="settings-title">Settings</h2>
+      <button class="toggle" type="button" role="switch" aria-checked="true" data-toggle="sound"><span>Sound</span><span class="switch" aria-hidden="true"></span></button>
+      <button class="toggle" type="button" role="switch" aria-checked="true" data-toggle="haptics"><span>Vibration</span><span class="switch" aria-hidden="true"></span></button>
+      <div class="reset-zone">
+        <button id="btn-reset" class="link-btn" type="button">Reset progress</button>
+        <div class="confirm" hidden>
+          <p>Start again from level 1? Coins and boosters reset too.</p>
+          <div class="row">
+            <button id="btn-reset-yes" class="btn btn-red" type="button">Reset</button>
+            <button id="btn-reset-no" class="btn btn-ghost" type="button">Cancel</button>
+          </div>
+        </div>
+      </div>
+      <button id="btn-settings-close" class="btn btn-green wide" type="button">Done</button>
+      <p class="version"></p>
+    </div>
+  </section>
+
+  <button id="update-pill" class="pill" type="button" hidden>Update</button>
+
+  <div id="install-hint" class="install-hint" role="note" hidden>
+    <span class="install-text">Install: Share → Add to Home Screen</span>
+    <button class="install-close" type="button" aria-label="Dismiss hint">&times;</button>
+  </div>
+
+  <pre id="errors" class="errors" hidden></pre>
+</div>
+</body>
+</html>

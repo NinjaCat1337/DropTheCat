@@ -1,0 +1,16 @@
+{
+  "name": "dropthecat",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node tools/serve.mjs",
+    "test": "node --test tests/unit/*.test.mjs",
+    "test:e2e": "node tests/e2e/smoke.mjs",
+    "levels": "node tools/gen-levels.mjs",
+    "icons": "node tools/make-icons.mjs",
+    "stamp": "node tools/stamp-sw.mjs"
+  },
+  "devDependencies": {
+    "playwright-core": "1.64.0"
+  }
+}

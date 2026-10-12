@@ -1,0 +1,18 @@
+{
+  "id": "/DropTheCat/",
+  "name": "Meow Drop · DropTheCat",
+  "short_name": "Meow Drop",
+  "description": "A cozy cat puzzle: slide the coloured holes under the cats of the same colour. No timer.",
+  "lang": "en",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#93AEFC",
+  "theme_color": "#7FD1FF",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
