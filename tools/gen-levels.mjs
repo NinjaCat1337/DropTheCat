@@ -14,40 +14,50 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const OUT = path.join(ROOT, 'src', 'core', 'level-data.js');
 const COUNT = 100;
 
-/** Hand-made tutorials (colours: 0 red, 1 orange, 2 yellow, 3 green, 4 cyan, 5 blue, 6 purple, 7 pink). */
+const blank = (w, h) => Array.from({ length: h }, () => '.'.repeat(w));
+
+/**
+ * Hand-made tutorials: tiny packed boards, one clear drag per hole (colours: 0 red, 1 orange, 2 yellow,
+ * 3 lime, 4 cyan, 5 blue, 6 purple, 7 pink, 8 white, 9 navy, 10 brown, 11 grey).
+ */
 const TUTORIALS = [
-  // 1: one colour, one 1×1 hole, three cats right above it — just drag it up.
+  // 1: two square holes; pull each one straight up through its cats.
   {
-    w: 5,
-    h: 6,
-    grid: ['.....', '.....', '.....', '.....', '.....', '.....'],
-    cats: [[2, 2, 0], [2, 3, 0], [2, 4, 0]],
-    holes: [{ x: 2, y: 5, c: 0, cells: [[0, 0]], need: 3 }],
-    solution: [[0, 'UUU']],
-  },
-  // 2: two colours side by side, each with its own hole; the blue hole is two cells wide and eats two at once.
-  {
-    w: 5,
-    h: 6,
-    grid: ['.....', '.....', '.....', '.....', '.....', '.....'],
-    cats: [[1, 1, 0], [1, 2, 0], [1, 3, 0], [3, 2, 5], [4, 2, 5], [3, 3, 5], [4, 3, 5]],
+    w: 4,
+    h: 5,
+    grid: blank(4, 5),
+    cats: [[0, 0, 0], [3, 0, 3], [0, 1, 0], [1, 1, 0], [2, 1, 3], [1, 2, 0], [2, 2, 3], [3, 2, 3]],
     holes: [
-      { x: 1, y: 4, c: 0, cells: [[0, 0]], need: 3 },
-      { x: 3, y: 4, c: 5, cells: [[0, 0], [1, 0]], need: 4 },
+      { x: 0, y: 3, c: 0, cells: [[0, 0], [1, 0], [0, 1], [1, 1]], need: 4 },
+      { x: 2, y: 3, c: 3, cells: [[0, 0], [1, 0], [0, 1], [1, 1]], need: 4 },
     ],
-    solution: [[0, 'UUU'], [1, 'UU']],
+    solution: [[0, 'UUU'], [1, 'UUU']],
   },
-  // 3: the first dependency — a row of blue cats walls the red hole off from its cats; clear it first.
+  // 2: three shapes, each with one straight drag in its own direction.
   {
-    w: 5,
-    h: 6,
-    grid: ['.....', '.....', '.....', '.....', '.....', '.....'],
-    cats: [[1, 1, 0], [2, 1, 0], [3, 1, 0], [0, 2, 5], [1, 2, 5], [2, 2, 5], [3, 2, 5], [4, 2, 5]],
+    w: 4,
+    h: 5,
+    grid: blank(4, 5),
+    cats: [[0, 0, 5], [1, 0, 5], [2, 0, 2], [1, 1, 5], [2, 1, 2], [2, 2, 2], [1, 4, 4], [2, 4, 4], [3, 4, 4]],
     holes: [
-      { x: 2, y: 5, c: 0, cells: [[0, 0]], need: 3 },
-      { x: 0, y: 3, c: 5, cells: [[0, 0]], need: 5 },
+      { x: 0, y: 2, c: 5, cells: [[0, 0], [1, 0], [0, 1]], need: 3 },
+      { x: 3, y: 0, c: 2, cells: [[0, 0], [0, 1], [0, 2]], need: 3 },
+      { x: 1, y: 3, c: 4, cells: [[0, 0], [1, 0], [2, 0]], need: 3 },
     ],
-    solution: [[1, 'URRRR'], [0, 'UUUULRR']],
+    solution: [[0, 'UU'], [1, 'L'], [2, 'D']],
+  },
+  // 3: the first dependency: the cyan hole is walled in until the yellow one has eaten its way through.
+  {
+    w: 4,
+    h: 6,
+    grid: blank(4, 6),
+    cats: [[1, 0, 4], [2, 0, 4], [1, 1, 2], [2, 1, 2], [2, 2, 2], [3, 2, 2], [3, 3, 4], [0, 4, 6], [3, 4, 4], [0, 5, 6]],
+    holes: [
+      { x: 0, y: 2, c: 2, cells: [[0, 0], [1, 0], [0, 1], [1, 1]], need: 4 },
+      { x: 1, y: 4, c: 6, cells: [[0, 0], [0, 1]], need: 2 },
+      { x: 2, y: 3, c: 4, cells: [[0, 0], [0, 1], [0, 2], [1, 2]], need: 4 },
+    ],
+    solution: [[0, 'URR'], [1, 'L'], [2, 'UUUL']],
   },
 ];
 
@@ -65,18 +75,16 @@ function makeLevel(n) {
     const t = TUTORIALS[n - 1];
     const def = { id: n, w: t.w, h: t.h, grid: t.grid, cats: t.cats, holes: t.holes, solution: t.solution };
     const ev = evaluateLevel(def, { playouts: 32, seed: n });
-    def.stats = { moves: def.solution.length, steps: ev.steps, trapRate: ev.trapRate, deepTrapRate: ev.smartTrapRate };
+    def.stats = {
+      drags: def.solution.length,
+      steps: ev.steps,
+      difficulty: Math.round(ev.difficulty * 100) / 100,
+      stalls: Math.round(ev.stalls * 100) / 100,
+      startHoles: ev.startHoles,
+    };
     return def;
   }
-  const P = levelParams(n);
-  const def = generateLevel(P, levelSeed(n));
-  def.stats = {
-    moves: def.stats.moves,
-    steps: def.stats.steps,
-    trapRate: def.stats.trapRate,
-    deepTrapRate: def.stats.smartTrapRate,
-  };
-  return def;
+  return generateLevel(levelParams(n), levelSeed(n));
 }
 
 function check(def) {
@@ -91,12 +99,14 @@ function check(def) {
 function features(def) {
   const f = [];
   const mods = (k) => def.cats.filter((c) => c[3] && c[3][k]).length;
+  const layered = def.holes.filter((h) => h.next && h.next.length);
+  if (layered.length) f.push(`layers${layered.map((h) => h.next.length + 1).join('+')}`);
   if (mods('ice')) f.push(`ice${mods('ice')}`);
   if (mods('box')) f.push(`box${mods('box')}`);
   if (def.grid.some((r) => r.includes('L'))) f.push(`lock${def.grid.join('').split('L').length - 1}`);
   const ax = def.holes.filter((h) => h.axis).length;
   if (ax) f.push(`axis${ax}`);
-  if (def.grid.some((r) => r.includes('#'))) f.push('walls');
+  if (def.grid.some((r) => r.includes('#') || r.includes('_'))) f.push('shape');
   return f.join(' ');
 }
 
@@ -106,28 +116,28 @@ function main() {
   const args = parseArgs(process.argv.slice(2));
   const ids = args.only ? [args.only] : Array.from({ length: COUNT }, (_, i) => i + 1);
   const levels = [];
-  console.log('  #  size  col holes cats need  mv steps trap deep start nodes   ms  features');
+  console.log('  #  size col holes cats empty drags steps  diff stalls start mosaic nodes   ms  features');
   const t0 = Date.now();
   for (const n of ids) {
     const t1 = Date.now();
     const def = makeLevel(n);
     const ev = check(def);
     const ms = Date.now() - t1;
-    const maxNeed = Math.max(...def.holes.map((h) => h.need));
     levels.push(def);
     const st = def.stats;
     const cols = [
       pad(n, 3),
       pad(`${def.w}x${def.h}`, 5),
-      pad(ev.colors, 4),
+      pad(ev.colors, 3),
       pad(ev.holes, 5),
       pad(ev.cats, 4),
-      pad(maxNeed, 4),
-      pad(st.moves, 3),
+      pad(ev.empty, 5),
+      pad(st.drags, 5),
       pad(st.steps, 5),
-      pad(st.trapRate.toFixed(2), 4),
-      pad(st.deepTrapRate.toFixed(2), 4),
-      pad(ev.startHoles, 5),
+      pad(st.difficulty.toFixed(2), 5),
+      pad(st.stalls.toFixed(2), 6),
+      pad(st.startHoles, 5),
+      pad(ev.mosaic.toFixed(2), 6),
       pad(ev.nodes, 5),
       pad(ms, 4),
     ];

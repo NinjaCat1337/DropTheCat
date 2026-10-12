@@ -9,11 +9,13 @@ Android. Once loaded, it can run offline.
 
 ## How to play
 
+- The board starts packed: colourful cats and big coloured holes, with only a few empty cells.
 - Drag a hole. It slides along the grid and stops at walls, crates, other holes and cats of other colours.
 - A cat drops into a hole of its own colour as soon as the hole covers it.
-- The number on a hole is how many cats it still needs. A full hole closes and frees its space.
-- Clear every hole to finish the level. When several holes share a colour, think about which hole takes
-  which cats: a hole that closes too early can leave the others stranded.
+- The number on a hole is how many cats it still needs (as many as the hole has cells). A full hole closes
+  and frees its space, which makes room for the others: find the right order and shuffle holes aside.
+- Every colour has exactly one hole, so a level can never get stuck: there are no dead ends.
+- **Layers:** a hole with a coloured ring turns that colour once it is full and then needs those cats.
 - New things appear along the way:
   - **Ice:** a frozen cat blocks everything until the shown number of other cats has dropped.
   - **Boxes:** a box hides a cat and opens when a cat next to it drops.
@@ -22,7 +24,6 @@ Android. Once loaded, it can run offline.
 - Every 10th level is a **Hard** level and gives more coins.
 - **Hint** shows a good next move. **Treat** calls the nearest cats of a hole's colour right into it.
   Both cost coins once your free ones are used up. Coins come from finished levels.
-- The game notices when no hole can reach a cat of its colour anymore and offers Undo or Restart.
 
 ## Run locally
 

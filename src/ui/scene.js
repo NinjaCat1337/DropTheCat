@@ -14,6 +14,8 @@ const CRACK_MS = 340;
 const MELT_MS = 480;
 const UNLOCK_MS = 600;
 const APPEAR_MS = 420;
+const LAYER_MS = 560;
+const TRAIL_MS = 520;
 
 const TAU = Math.PI * 2;
 
@@ -34,6 +36,9 @@ export function createScene(canvas, art) {
   let highlight = false;
   let lastNow = 0;
   let shown = null;
+  let layerFx = [];
+  let trails = [];
+  let lastPos = [];
 
   const fxOf = (i) => {
     let e = fx.get(i);
@@ -75,6 +80,9 @@ export function createScene(canvas, art) {
     highlight = false;
     shown = g.color.slice();
     particles.clear();
+    layerFx = new Array(g.holeCount).fill(null);
+    trails = [];
+    lastPos = views.map((v) => ({ x: v.x, y: v.y }));
   }
 
   function px(cx) {
@@ -103,6 +111,14 @@ export function createScene(canvas, art) {
         fxOf(i).melt = now;
       } else if (e.type === 'unlock') {
         unlockT0 = now;
+      } else if (e.type === 'layer') {
+        // The hole turns its next colour: colour sweep + a small burst in the new colour.
+        layerFx[e.hole] = { t0: now, prev: e.prev };
+        pulses[e.hole] = now;
+        const view = holeOrigin(e.hole);
+        const c = centroid(game.holeCells(e.hole));
+        const col = PALETTE[e.c];
+        particles.burst(px(view.x + c.x), py(view.y + c.y), [col.main, col.light, '#FFFFFF'], now + 60, L.cell / 70, 10);
       } else if (e.type === 'complete') {
         const view = holeOrigin(e.hole);
         const cells = game.holeCells(e.hole);
@@ -252,7 +268,9 @@ export function createScene(canvas, art) {
       if (game.need[k] <= 0) continue;
       const v = views[k];
       const pa = (now - pulses[k]) / PULSE_MS;
-      art.drawHoleBadge(ctx, game.holeCells(k), px(v.x), py(v.y), game.holeColor(k), game.need[k], { pulse: pa < 1 ? 1 - pa : 0 });
+      const f = layerFx[k];
+      const change = f ? Math.min(1, Math.max(0, (now - f.t0) / LAYER_MS)) : 0;
+      art.drawHoleBadge(ctx, game.holeCells(k), px(v.x), py(v.y), game.holeColor(k), game.need[k], { pulse: pa < 1 ? 1 - pa : 0, change });
     }
   }
 
@@ -260,7 +278,13 @@ export function createScene(canvas, art) {
     if (!game || !L) return;
     const holes = [];
     for (let k = 0; k < game.holeCount; k++) {
-      holes.push({ cells: game.holeCells(k), c: game.holeColor(k), axis: game.holeAxis(k), need: game.L.hole0.need[k] });
+      const layers = game.L.holes[k].layers;
+      layers.forEach((layer, i) => {
+        holes.push({
+          cells: game.holeCells(k), c: layer.c, axis: game.holeAxis(k), need: layer.need,
+          next: layers.slice(i + 1).map((l) => l.c),
+        });
+      });
     }
     art.prewarm({ colors: game.L.colors, holes });
   }
@@ -344,9 +368,55 @@ export function createScene(canvas, art) {
     }
   }
 
+  function drawTrails(now) {
+    for (let k = 0; k < game.holeCount; k++) {
+      const last = lastPos[k];
+      if (!last || game.need[k] <= 0) continue;
+      if (last.x === game.hx[k] && last.y === game.hy[k]) continue;
+      const cells = game.holeCells(k);
+      const covered = new Set(cells.map(([dx, dy]) => (game.hx[k] + dx) + ',' + (game.hy[k] + dy)));
+      for (const [dx, dy] of cells) {
+        const x = last.x + dx;
+        const y = last.y + dy;
+        if (!covered.has(x + ',' + y)) trails.push({ x, y, c: game.holeColor(k), t0: now });
+      }
+      lastPos[k] = { x: game.hx[k], y: game.hy[k] };
+    }
+    if (!trails.length) return;
+    const keep = [];
+    for (const tr of trails) {
+      const p = (now - tr.t0) / TRAIL_MS;
+      if (p >= 1) continue;
+      keep.push(tr);
+      const a = 0.9 * (1 - p) * (1 - p);
+      if (typeof art.drawTrail === 'function') art.drawTrail(ctx, px(tr.x), py(tr.y), tr.c, a);
+      else {
+        ctx.save();
+        ctx.globalAlpha = a;
+        ctx.fillStyle = PALETTE[tr.c].light;
+        roundRect(ctx, px(tr.x) + 2, py(tr.y) + 2, L.cell - 4, L.cell - 4, L.cell * 0.18);
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+    trails = keep;
+  }
+
+  function layerOpts(k, now) {
+    const f = layerFx[k];
+    if (!f) return null;
+    const p = (now - f.t0) / LAYER_MS;
+    if (p >= 1) {
+      layerFx[k] = null;
+      return null;
+    }
+    return { change: Math.max(0, p), prev: f.prev };
+  }
+
   function drawHoles(now, dt) {
     const t = now / 1000;
     const k1 = 1 - Math.exp(-dt / 45);
+    drawTrails(now);
     const order = [];
     for (let k = 0; k < game.holeCount; k++) if (game.need[k] > 0) order.push(k);
     if (drag) order.sort((a, b) => (a === drag.k) - (b === drag.k));
@@ -364,8 +434,10 @@ export function createScene(canvas, art) {
       }
       v.lift += ((dragging ? 1 : 0) - v.lift) * (1 - Math.exp(-dt / 60));
       const pa = (now - pulses[k]) / PULSE_MS;
+      const lf = layerOpts(k, now);
       art.drawHole(ctx, game.holeCells(k), px(v.x), py(v.y), game.holeColor(k), {
         need: game.need[k], lifted: v.lift, axis: game.holeAxis(k), closing: 0, pulse: pa < 1 ? 1 - pa : 0, t, badge: false,
+        next: game.holeNext(k), change: lf ? lf.change : 0, prev: lf ? lf.prev : undefined,
       });
       if (highlight) outline(game.holeCells(k), v.x, v.y, '#FFE45C', 0.6 + 0.4 * Math.sin(now / 150));
     }
@@ -380,7 +452,7 @@ export function createScene(canvas, art) {
       g.x = x;
       g.y = y;
       art.drawHole(ctx, game.holeCells(g.k), px(x), py(y), game.holeColor(g.k), {
-        need: 0, lifted: 0, axis: game.holeAxis(g.k), closing: p, pulse: 0, t,
+        need: 0, lifted: 0, axis: game.holeAxis(g.k), closing: p, pulse: 0, t, next: [],
       });
     }
     closing = keep;
@@ -470,7 +542,10 @@ export function createScene(canvas, art) {
       shown = game.color.slice();
       for (let k = 0; k < game.holeCount; k++) {
         if (opts.instant || !views[k]) views[k] = { x: game.hx[k], y: game.hy[k], lift: 0 };
+        lastPos[k] = { x: game.hx[k], y: game.hy[k] };
+        layerFx[k] = null;
       }
+      trails = [];
     },
     /** Cell coordinates (fractional) of a point in CSS px. */
     toCell(x, y) {
@@ -500,7 +575,7 @@ export function createScene(canvas, art) {
     },
     /** True while something is still animating (falling cats, closing holes, particles). */
     busy() {
-      return falling.length > 0 || closing.length > 0 || particles.count > 0;
+      return falling.length > 0 || closing.length > 0 || particles.count > 0 || trails.length > 0 || layerFx.some(Boolean);
     },
     frame(now) {
       const dt = lastNow ? Math.min(64, Math.max(0, now - lastNow)) : 16;

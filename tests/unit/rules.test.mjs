@@ -28,7 +28,7 @@ test('compileLevel rejects broken definitions', () => {
   bad((d) => (d.cats = [[5, 0, 0]]), /off board/);
   bad((d) => (d.grid[0] = '.#.') && (d.cats = [[1, 0, 0]]), /not on plain floor/);
   bad((d) => (d.cats = [[1, 0, 0], [1, 0, 0]]), /two cats/);
-  bad((d) => (d.cats = [[1, 0, 8]]), /bad cat colour/);
+  bad((d) => (d.cats = [[1, 0, 12]]), /bad cat colour/);
   bad((d) => (d.grid[1] = '.L.'), /need at least one key/);
   bad((d) => (d.holes = []), /non-empty/);
   bad((d) => (d.holes[0].x = 3), /off board/);
@@ -314,4 +314,116 @@ test('Game accepts a compiled level and shares it between clones', () => {
   assert.deepEqual(g.holeCells(0), [[0, 0]]);
   assert.ok(g.step(0, 1, 0, null) === null, 'null events skip event objects');
   assert.equal(g.isWon(), true);
+});
+
+// ---------------------------------------------------------------------------------------------------------
+// Layered holes and the 12 colours
+// ---------------------------------------------------------------------------------------------------------
+
+/** A 2-layer hole (red, then blue) and a lime hole on a 4×3 board. */
+function layered() {
+  return lvl(
+    ['....', '....', '....'],
+    [[1, 0, 0], [2, 0, 0], [3, 0, 5], [3, 1, 5], [0, 2, 3]],
+    [
+      { x: 0, y: 0, c: 0, cells: I1, need: 2, next: [[5, 2]] },
+      { x: 0, y: 1, c: 3, cells: I1, need: 1 },
+    ],
+  );
+}
+
+test('compileLevel checks layered holes and accepts colours up to 11', () => {
+  assert.doesNotThrow(() => compileLevel(layered()));
+  const L = compileLevel(layered());
+  assert.deepEqual(L.holes[0].layers, [{ c: 0, need: 2 }, { c: 5, need: 2 }]);
+  const bad = (mutate, re) => {
+    const def = layered();
+    mutate(def);
+    assert.throws(() => compileLevel(def), re);
+  };
+  bad((d) => (d.holes[0].next = [[5]]), /a layer must be \[colour, need\]/);
+  bad((d) => (d.holes[0].next = 'x'), /bad next layers/);
+  bad((d) => (d.holes[0].next = [[12, 2]]), /bad layer colour/);
+  bad((d) => (d.holes[0].next = [[5, 0]]), /layer need must be/);
+  bad((d) => (d.holes[0].next = [[5, 3]]), /colour 5: 2 cat\(s\) but the holes need 3/);
+  // A layered colour belongs to that hole alone, once.
+  bad((d) => d.holes.push({ x: 1, y: 2, c: 5, cells: I1, need: 1 }) && d.cats.push([2, 2, 5]), /must belong to this hole alone/);
+  bad((d) => (d.holes[0].next = [[5, 2], [0, 1]]) && d.cats.push([2, 2, 0]), /must belong to this hole alone/);
+  // Colours 8..11 exist; 12 does not.
+  const wide = lvl(['...'], [[1, 0, 11], [2, 0, 8]], [{ x: 0, y: 0, c: 11, cells: I1, need: 1, next: [[8, 1]] }]);
+  assert.doesNotThrow(() => compileLevel(wide));
+  assert.throws(() => compileLevel(lvl(['..'], [[1, 0, 12]], [{ x: 0, y: 0, c: 12, cells: I1, need: 1 }])), /bad (cat|hole)/);
+});
+
+test('a layered hole turns its next colour when a layer is full, then closes after the last one', () => {
+  const g = new Game(layered());
+  assert.equal(g.holeColor(0), 0);
+  assert.equal(g.holeLayer(0), 0);
+  assert.deepEqual(g.holeNext(0), [5]);
+  assert.equal(g.canStep(0, 0, 1), false, 'the lime hole is below it');
+  g.step(0, 1, 0);
+  const ev = g.step(0, 1, 0);
+  assert.deepEqual(types(ev), ['drop', 'layer']);
+  assert.deepEqual(ev[1], { type: 'layer', hole: 0, c: 5, prev: 0, need: 2, hx: 2, hy: 0 });
+  assert.equal(g.holeColor(0), 5);
+  assert.equal(g.holeLayer(0), 1);
+  assert.deepEqual(g.holeNext(0), []);
+  assert.equal(g.isOpenHole(0), true);
+  assert.equal(g.need[0], 2);
+  // Now it takes blue cats (it could not step onto them while red).
+  assert.deepEqual(types(g.step(0, 1, 0)), ['drop']);
+  assert.deepEqual(types(g.step(0, 0, 1)), ['drop', 'complete']);
+  assert.equal(g.isOpenHole(0), false);
+  g.step(1, 0, 1);
+  assert.equal(g.isWon(), true);
+});
+
+test('layers are part of the state: stateKey, snapshot/restore, toJSON/fromJSON', () => {
+  const def = layered();
+  const g = new Game(def);
+  g.step(0, 1, 0);
+  const before = g.stateKey();
+  const snap = g.snapshot();
+  g.step(0, 1, 0); // finishes the red layer
+  assert.notEqual(g.stateKey(), before);
+  const data = JSON.parse(JSON.stringify(g.toJSON()));
+  assert.deepEqual(data.layer, [1, 0]);
+  const back = Game.fromJSON(def, data);
+  assert.ok(back);
+  assert.equal(back.holeColor(0), 5);
+  assert.equal(back.stateKey(), g.stateKey());
+  assert.equal(Game.fromJSON(def, { ...data, layer: [2, 0] }), null, 'no such layer');
+  assert.equal(Game.fromJSON(def, { ...data, layer: [0, 0], need: [0, 1] }), null, 'a finished first layer must have moved on');
+  assert.equal(Game.fromJSON(def, { ...data, need: [3, 1] }), null, 'more than the layer needs');
+  // Saves from before layers existed (no layer field) load as first layers.
+  const early = new Game(def);
+  early.step(0, 1, 0);
+  const old = JSON.parse(JSON.stringify(early.toJSON()));
+  delete old.layer;
+  const loaded = Game.fromJSON(def, old);
+  assert.ok(loaded);
+  assert.equal(loaded.holeLayer(0), 0);
+  assert.equal(loaded.stateKey(), early.stateKey());
+  g.restore(snap);
+  assert.equal(g.stateKey(), before);
+  assert.equal(g.holeColor(0), 0);
+});
+
+test('treat fills the current layer only', () => {
+  const g = new Game(layered());
+  const ev = g.treat(0);
+  assert.deepEqual(types(ev), ['drop', 'drop', 'layer']);
+  assert.ok(ev.slice(0, 2).every((e) => e.c === 0 && e.fly));
+  assert.equal(g.holeColor(0), 5);
+  assert.equal(g.need[0], 2);
+  assert.equal(g.catAt(3, 0), 5, 'the blue cats wait for another treat or a drag');
+});
+
+test('canEverCollect and isStuck use the current layer colour', () => {
+  const g = new Game(layered());
+  assert.equal(g.canEverCollect(0), true);
+  g.step(0, 1, 0);
+  g.step(0, 1, 0);
+  assert.equal(g.canEverCollect(0), true, 'blue cats are next to it now');
+  assert.equal(g.isStuck(), false);
 });

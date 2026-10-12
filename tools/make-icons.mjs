@@ -23,7 +23,7 @@ try {
   const page = await browser.newPage({ deviceScaleFactor: 1 });
   for (const [name, size, scale] of files) {
     await page.setViewportSize({ width: size, height: size });
-    await page.setContent(`<style>html,body{margin:0;width:100%;height:100%;background:#93AEFC}body{display:grid;place-items:center}img{width:${size * scale}px;height:${size * scale}px}</style><img src="${url}">`);
+    await page.setContent(`<style>html,body{margin:0;width:100%;height:100%;background:#A48DF5}body{display:grid;place-items:center}img{width:${size * scale}px;height:${size * scale}px}</style><img src="${url}">`);
     await page.locator('img').evaluate((img) => img.decode());
     const file = path.isAbsolute(name) ? name : path.join(outDir, name);
     await fs.mkdir(path.dirname(file), { recursive: true });

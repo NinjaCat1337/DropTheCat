@@ -189,3 +189,76 @@ test('typical late-level hints are fast', () => {
   const median = times[times.length >> 1];
   assert.ok(median < 150, `median hint ${median.toFixed(1)} ms`);
 });
+
+test('solves layered holes (each layer its own colour)', () => {
+  const def = lvl(
+    ['....', '....', '....'],
+    [[1, 0, 0], [2, 0, 0], [3, 0, 5], [3, 1, 5], [0, 2, 3]],
+    [
+      { x: 0, y: 0, c: 0, cells: I1, need: 2, next: [[5, 2]] },
+      { x: 0, y: 1, c: 3, cells: I1, need: 1 },
+    ],
+  );
+  const g = new Game(def);
+  const r = solve(g);
+  assert.ok(r && wins(g, r.moves));
+  assert.equal(explorer(g.L).unique, true);
+});
+
+test('unstall finds the slides that let someone eat on a packed board', () => {
+  // Nobody can eat: the red bar needs to pass the blue one, which first has to step up into the gap.
+  const def = lvl(
+    ['##..##', '......'],
+    [[4, 1, 0], [5, 1, 5]],
+    [
+      { x: 0, y: 1, c: 0, cells: [[0, 0], [1, 0]], need: 1 },
+      { x: 2, y: 1, c: 5, cells: [[0, 0], [1, 0]], need: 1 },
+    ],
+  );
+  const g = new Game(def);
+  const ex = explorer(g.L);
+  assert.equal(ex.productiveMoves(g).length, 0, 'a stall');
+  const seq = ex.unstall(g);
+  assert.deepEqual(seq[0], [1, 'U'], 'blue steps aside first');
+  assert.ok(seq.length <= 4);
+  const t = g.clone();
+  for (const [k, ch] of seq) assert.ok(applyPath(t, k, ch));
+  assert.ok(ex.productiveMoves(t).length > 0);
+  const r = solve(g);
+  assert.ok(r && wins(g, r.moves));
+});
+
+test('on levels with one hole per colour the solver wins from any reachable state', () => {
+  // Random states: random productive drags mixed with random single slides of random holes.
+  let seed = 7;
+  const rand = () => {
+    seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+    return seed / 4294967296;
+  };
+  for (const n of [6, 21, 47, 73, 98]) {
+    const def = getLevel(n);
+    const g0 = new Game(def);
+    const ex = explorer(g0.L);
+    assert.ok(ex.unique, `level ${n} has one hole per colour`);
+    for (let trial = 0; trial < 6; trial++) {
+      const g = g0.clone();
+      const moves = Math.floor(rand() * 25);
+      for (let i = 0; i < moves && !g.isWon(); i++) {
+        if (rand() < 0.4) {
+          const k = Math.floor(rand() * g.holeCount);
+          const [dx, dy] = Object.values(STEPS)[Math.floor(rand() * 4)];
+          if (g.canStep(k, dx, dy)) g.step(k, dx, dy, null);
+          continue;
+        }
+        const mv = ex.productiveMoves(g);
+        if (!mv.length) continue;
+        const m = mv[Math.floor(rand() * mv.length)];
+        applyPath(g, m.hole, m.path);
+      }
+      if (g.isWon()) continue;
+      const r = solve(g, { maxNodes: 20000 });
+      assert.ok(r, `level ${n} trial ${trial}`);
+      assert.ok(wins(g, r.moves), `level ${n} trial ${trial} replays`);
+    }
+  }
+});

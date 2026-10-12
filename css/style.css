@@ -52,7 +52,7 @@ body {
   font-family: 'Nunito', ui-rounded, 'SF Pro Rounded', system-ui, sans-serif;
   font-weight: 800;
   color: var(--ink);
-  background: linear-gradient(180deg, var(--bg1) 0%, #93AEFC 55%, var(--bg2) 100%);
+  background: linear-gradient(180deg, #C2B3FC 0%, #A893F6 42%, #8F72EE 100%);
   -webkit-user-select: none;
   user-select: none;
   -webkit-touch-callout: none;
@@ -83,15 +83,35 @@ button:focus-visible {
   position: fixed;
   inset: 0;
   overflow: hidden;
+  isolation: isolate;
 }
 
-/* Soft paw-print wallpaper. */
+/* Soft clouds and sparkles on the lavender sky (behind everything in .app). */
+.app::after {
+  content: '';
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(ellipse 120px 46px at 12% 18%, rgba(255, 255, 255, 0.32), transparent 70%),
+    radial-gradient(ellipse 90px 36px at 22% 15%, rgba(255, 255, 255, 0.28), transparent 70%),
+    radial-gradient(ellipse 150px 54px at 88% 34%, rgba(255, 255, 255, 0.26), transparent 70%),
+    radial-gradient(ellipse 110px 42px at 78% 37%, rgba(255, 255, 255, 0.22), transparent 70%),
+    radial-gradient(ellipse 140px 50px at 8% 72%, rgba(255, 255, 255, 0.2), transparent 70%),
+    radial-gradient(ellipse 160px 60px at 92% 86%, rgba(255, 255, 255, 0.2), transparent 70%),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180' viewBox='0 0 180 180'%3E%3Cg fill='%23fff'%3E%3Cpath d='M30 20l2.2 6.8L39 29l-6.8 2.2L30 38l-2.2-6.8L21 29l6.8-2.2z' opacity='.55'/%3E%3Cpath d='M140 60l1.5 4.5L146 66l-4.5 1.5L140 72l-1.5-4.5L134 66l4.5-1.5z' opacity='.45'/%3E%3Cpath d='M95 140l1.8 5.2 5.2 1.8-5.2 1.8L95 154l-1.8-5.2L88 147l5.2-1.8z' opacity='.4'/%3E%3Ccircle cx='160' cy='150' r='2' opacity='.5'/%3E%3Ccircle cx='60' cy='100' r='1.6' opacity='.45'/%3E%3C/g%3E%3C/svg%3E");
+  background-size: auto, auto, auto, auto, auto, auto, 180px 180px;
+}
+
+/* Faint paw prints. */
 .app::before {
   content: '';
   position: absolute;
+  z-index: -1;
   inset: 0;
   pointer-events: none;
-  opacity: 0.13;
+  opacity: 0.06;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120' viewBox='0 0 120 120'%3E%3Cg fill='%23fff'%3E%3Cg transform='translate(22 26) rotate(-18)'%3E%3Cellipse cx='0' cy='6' rx='7' ry='6'/%3E%3Cellipse cx='-8' cy='-3' rx='2.8' ry='3.6'/%3E%3Cellipse cx='-3' cy='-8' rx='2.8' ry='3.6'/%3E%3Cellipse cx='3' cy='-8' rx='2.8' ry='3.6'/%3E%3Cellipse cx='8' cy='-3' rx='2.8' ry='3.6'/%3E%3C/g%3E%3Cg transform='translate(84 82) rotate(22)'%3E%3Cellipse cx='0' cy='6' rx='7' ry='6'/%3E%3Cellipse cx='-8' cy='-3' rx='2.8' ry='3.6'/%3E%3Cellipse cx='-3' cy='-8' rx='2.8' ry='3.6'/%3E%3Cellipse cx='3' cy='-8' rx='2.8' ry='3.6'/%3E%3Cellipse cx='8' cy='-3' rx='2.8' ry='3.6'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E");
   background-size: 120px 120px;
 }
@@ -123,12 +143,66 @@ button:focus-visible {
   left: 0;
   right: 0;
   top: 0;
-  padding: calc(var(--sat) + 10px) calc(var(--sar) + 14px) 6px calc(var(--sal) + 14px);
+  padding: calc(var(--sat) + 8px) calc(var(--sar) + 12px) 10px calc(var(--sal) + 12px);
   display: grid;
-  grid-template-columns: 48px 1fr 48px;
+  grid-template-columns: 48px 1fr auto 48px;
   align-items: center;
   gap: 8px;
   pointer-events: none;
+  background: linear-gradient(180deg, #A68AF8 0%, #8562EC 100%);
+  border-radius: 0 0 28px 28px;
+  box-shadow: 0 5px 0 #6040CF, 0 10px 22px rgba(60, 30, 140, 0.28), inset 0 -2px 0 rgba(255, 255, 255, 0.18);
+}
+
+/* A little cat face peeking over the left end of the header. */
+.topbar::before {
+  content: '';
+  position: absolute;
+  left: calc(var(--sal) + 4px);
+  bottom: -14px;
+  width: 54px;
+  height: 22px;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 54 22'%3E%3Cpath d='M4 0h46v8c0 7.7-9.5 14-23 14S4 15.7 4 8z' fill='%238562EC'/%3E%3Cellipse cx='19' cy='7' rx='2.2' ry='2.6' fill='%233A2378'/%3E%3Cellipse cx='35' cy='7' rx='2.2' ry='2.6' fill='%233A2378'/%3E%3Cpath d='M24.5 11.5q2.5 2.2 5 0' stroke='%233A2378' stroke-width='1.6' fill='none' stroke-linecap='round'/%3E%3Cellipse cx='13' cy='12' rx='3' ry='1.8' fill='%23FF9EC4' opacity='.7'/%3E%3Cellipse cx='41' cy='12' rx='3' ry='1.8' fill='%23FF9EC4' opacity='.7'/%3E%3C/svg%3E") center / contain no-repeat;
+  pointer-events: none;
+}
+
+.level-tag {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-width: 74px;
+  padding: 3px 14px 4px;
+  border-radius: 14px;
+  line-height: 1;
+  color: #fff;
+  background: linear-gradient(180deg, #FFB0CC 0%, #F77BA8 100%);
+  box-shadow: 0 4px 0 #CF4F80, inset 0 2px 0 rgba(255, 255, 255, 0.45), 0 0 0 3px rgba(255, 255, 255, 0.85);
+  text-shadow: 0 2px 0 #B83D6C, 0 0 2px #B83D6C;
+}
+
+.level-tag small {
+  font-size: 13px;
+  font-weight: 900;
+  letter-spacing: 0.5px;
+}
+
+.level-tag b {
+  font-size: 25px;
+  font-weight: 900;
+}
+
+.coin-pill.small {
+  height: 36px;
+  padding: 0 12px 0 4px;
+  font-size: 16px;
+  gap: 5px;
+  box-shadow: 0 3px 0 #6040CF;
+}
+
+.coin-pill.small .coin {
+  width: 26px;
+  height: 26px;
 }
 
 .topbar > * {
@@ -174,8 +248,17 @@ button:focus-visible {
   letter-spacing: 0.3px;
 }
 
+.level-title {
+  position: relative;
+}
+
+/* HARD hangs as a ribbon under the level tag, out of the header's flow. */
 .hard-badge {
-  font-size: 13px;
+  position: absolute;
+  left: 50%;
+  bottom: -13px;
+  transform: translateX(-50%) rotate(-3deg);
+  font-size: 11px;
   line-height: 1;
   letter-spacing: 0.6px;
   text-transform: uppercase;
@@ -217,34 +300,35 @@ button:focus-visible {
 }
 
 .tool-face {
-  width: 62px;
-  height: 62px;
-  border-radius: 21px;
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
   display: grid;
   place-items: center;
-  color: var(--purple);
-  background: linear-gradient(#fff, #F1ECFF);
-  box-shadow: 0 5px 0 var(--face-edge), 0 9px 16px rgba(58, 39, 99, 0.2);
+  color: #EDE7FF;
+  background: radial-gradient(circle at 50% 32%, #54418F 0%, #33246A 62%, #271A55 100%);
+  box-shadow: 0 5px 0 #1E1446, 0 9px 16px rgba(30, 15, 80, 0.3), inset 0 2px 0 rgba(255, 255, 255, 0.16), 0 0 0 3px rgba(255, 255, 255, 0.22);
   transition: transform 0.08s, box-shadow 0.08s, background 0.2s;
 }
 
 .tool-face svg {
-  width: 32px;
-  height: 32px;
+  width: 31px;
+  height: 31px;
   fill: currentColor;
+  filter: drop-shadow(0 2px 0 rgba(0, 0, 0, 0.35));
 }
 
 #btn-hint .tool-face {
-  color: #F2A800;
+  color: #FFD23F;
 }
 
 #btn-treat .tool-face {
-  color: #FF7A45;
+  color: #FF9A5C;
 }
 
 .tool:active .tool-face {
   transform: translateY(4px);
-  box-shadow: 0 1px 0 var(--face-edge), 0 4px 8px rgba(58, 39, 99, 0.2);
+  box-shadow: 0 1px 0 #1E1446, 0 4px 8px rgba(30, 15, 80, 0.3), inset 0 2px 0 rgba(255, 255, 255, 0.16), 0 0 0 3px rgba(255, 255, 255, 0.22);
 }
 
 .tool:disabled {
@@ -252,21 +336,22 @@ button:focus-visible {
 }
 
 .tool:disabled .tool-face {
-  opacity: 0.5;
+  opacity: 0.45;
   transform: none;
-  box-shadow: 0 5px 0 var(--face-edge);
 }
 
 .tool.active .tool-face {
-  background: linear-gradient(#FFF1A8, #FFC93C);
-  box-shadow: 0 5px 0 #E0A21A, 0 0 0 4px rgba(255, 255, 255, 0.7), 0 9px 16px rgba(58, 39, 99, 0.25);
+  color: #7A4A00;
+  background: radial-gradient(circle at 50% 32%, #FFF3A8 0%, #FFC93C 70%, #F0A800 100%);
+  box-shadow: 0 5px 0 #C98700, 0 0 0 4px rgba(255, 255, 255, 0.8), 0 9px 16px rgba(58, 39, 99, 0.25);
   animation: wiggle 1.2s ease-in-out infinite;
 }
 
 .badge {
   position: absolute;
-  top: -7px;
-  right: -9px;
+  top: auto;
+  bottom: 14px;
+  right: -6px;
   min-width: 26px;
   height: 26px;
   padding: 0 7px;
@@ -277,9 +362,9 @@ button:focus-visible {
   font-weight: 900;
   line-height: 1;
   color: #fff;
-  background: var(--red);
-  box-shadow: 0 2px 0 var(--red-dark), 0 0 0 2px #fff;
-  text-shadow: none;
+  background: linear-gradient(#5AA2FF, #2F6FE8);
+  box-shadow: 0 2px 0 #1F4FB0, 0 0 0 2px #fff;
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.3);
 }
 
 .badge.plus {
@@ -297,7 +382,7 @@ button:focus-visible {
 .tip {
   position: absolute;
   left: 50%;
-  top: calc(var(--sat) + 70px);
+  top: calc(var(--sat) + 84px);
   transform: translateX(-50%);
   width: max-content;
   max-width: min(92vw, 440px);

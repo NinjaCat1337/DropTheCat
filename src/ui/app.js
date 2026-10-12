@@ -25,15 +25,15 @@ const TIPS = [
   { id: 'drag', test: (n) => n === 1, text: 'Drag the hole under the cats of its colour' },
   { id: 'two', test: (n) => n === 2, text: 'Each hole only takes cats of its own colour' },
   { id: 'order', test: (n) => n === 3, text: 'Other cats block the way — clear them first' },
+  {
+    id: 'layers',
+    test: (n, d) => d.holes.some((h) => h.next && h.next.length),
+    text: 'A ringed hole has layers: fill it, and it turns the ring’s colour',
+  },
   { id: 'ice', test: (n, d) => d.cats.some((c) => c[3] && c[3].ice), text: 'Frozen cats thaw as other cats drop — watch the number' },
   { id: 'box', test: (n, d) => d.cats.some((c) => c[3] && c[3].box), text: 'A box opens when a cat next to it drops' },
   { id: 'axis', test: (n, d) => d.holes.some((h) => h.axis), text: 'Holes with arrows slide only that way' },
   { id: 'lock', test: (n, d) => d.grid.some((r) => r.includes('L')), text: 'Drop the cat with the key to open the crates' },
-  {
-    id: 'twins',
-    test: (n, d) => new Set(d.holes.map((h) => h.c)).size < d.holes.length,
-    text: 'A hole closes when it is full — choose wisely which hole takes which cats',
-  },
 ];
 
 const snapToJSON = (s) => ({
@@ -160,8 +160,10 @@ export function createApp({ root, nosave = false, debug = false, firstLevel = nu
     el.textContent = text;
     el.hidden = false;
     el.classList.remove('hide');
-    tipSticky = sticky;
-    if (!sticky) tipTimer = setTimeout(hideTip, ms);
+    // On small screens the tip sits over the header, so it never stays for long there.
+    const tight = root.classList.contains('tight');
+    tipSticky = sticky && !tight;
+    if (!tipSticky) tipTimer = setTimeout(hideTip, tight ? Math.max(ms, 4500) : ms);
   }
 
   function hideTip() {
@@ -284,12 +286,17 @@ export function createApp({ root, nosave = false, debug = false, firstLevel = nu
     const free = freeArea(metrics.width, metrics.height, top, tools);
     // Keep a band for tip banners under the top bar when that costs no board size (tall phones).
     let fit = fitBoard(free, def.w, def.h);
-    const band = Math.min(64, free.h * 0.12);
+    const band = Math.min(96, free.h * 0.14);
     const banded = fitBoard({ ...free, y: free.y + band, h: free.h - band }, def.w, def.h);
     if (banded.cell >= fit.cell) fit = banded;
     // No room for the band (small phones): tips go into the top bar instead of over the board.
     const tipH = metrics.width < 420 ? 70 : 50;
-    root.classList.toggle('tight', fit.y < top.bottom + 6 + tipH);
+    root.classList.toggle('tight', fit.y < top.bottom + 18 + tipH);
+    if (tipSticky && root.classList.contains('tight')) {
+      tipSticky = false;
+      clearTimeout(tipTimer);
+      tipTimer = setTimeout(hideTip, 4500);
+    }
     scene.resize({ width: metrics.width, height: metrics.height, dpr: metrics.dpr, ...fit });
   }
 
@@ -335,7 +342,8 @@ export function createApp({ root, nosave = false, debug = false, firstLevel = nu
     treatMode = false;
     scene.setHighlight(false);
     scene.setGame(game);
-    $('#level-name').textContent = `Level ${n}`;
+    $('#level-num').textContent = String(n);
+    $('#level-name').setAttribute('aria-label', `Level ${n}`);
     $('#hard-badge').hidden = !isHardLevel(n);
     setScreen('game');
     scene.intro(now());

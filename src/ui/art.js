@@ -2,6 +2,10 @@
 // logic), no DOM access at import time. Everything is painted once into per-size sprite caches (canvases at
 // cell × dpr resolution) and composited with drawImage + transforms every frame.
 //
+// Look: chubby "mochi" cats that fill their cell, holes with a flat rim in the hole colour and a deep
+// gradient pit, a small number tag on the rim's bottom-right corner, warm peach floor tiles in a thick purple
+// frame.
+//
 // ──────────────────────────────────────────── USAGE ────────────────────────────────────────────
 //   import { createArt, PALETTE } from './art.js';
 //   const art = createArt();
@@ -13,75 +17,86 @@
 //
 // Conventions
 //   • All coordinates are CSS px; the caller's transform is restored after every call.
-//   • Draw order (each layer over the previous one): CSS background → board canvas → crates → holes
-//     (pit + rim + badge) → falling cats, each one inside ctx.save(); art.clipHole(...); art.drawCat(...);
-//     ctx.restore() → standing cats in row order, top row first (cats overlap the row above a little; a box
-//     or ice block is drawn right after its cat) → particles → (optional) badges drawn last, see drawHole.
+//   • Draw order (each layer over the previous one): CSS background → board canvas → crates → trails →
+//     holes (badge: false) → falling cats, each inside ctx.save(); art.clipHole(...); art.drawCat(...);
+//     ctx.restore() → standing cats in row order, top row first (a box or ice block right after its cat)
+//     → hole badges (drawHoleBadge) → particles.
 //   • Integer cell sizes keep tile edges crisp (fractional ones work, just slightly softer).
 //   • pulse (holes) and crack (ice) are intensities: 1 at the event, decaying to 0. hop / open / closing /
-//     shatter are progress values 0 → 1.
+//     shatter / change are progress values 0 → 1.
 //   • The board canvas never changes during a level: it can also live in its own <canvas> under the
 //     animated one, so it is composited instead of redrawn every frame.
 //
 // ──────────────────────────────────────────── API ──────────────────────────────────────────────
-// PALETTE[c] (c = colour id 0..7: red, orange, yellow, green, cyan, blue, purple, pink)
-//   { name, main, light, dark, outline, deep }: hex strings. main = fur / rim, light = muzzle / highlights,
-//   dark = shading, outline = line colour, deep = pit interior.
+// PALETTE[c] (c = colour id 0..11: red, orange, yellow, lime, cyan, blue, purple, pink, white, navy, brown,
+//   grey) { name, main, light, dark, outline, deep }: hex strings. main = fur / rim, light = bib / highlights,
+//   dark = shading, outline = line colour, deep = pit interior. Colour ids outside 0..11 wrap around.
 //
 // createArt() → art
 //   art.setMetrics({ cell, dpr })  Sets the cell size (CSS px) and pixel ratio and drops every cached sprite
 //       (no-op when both are unchanged); sprites are painted lazily on first use (~1 ms each; see prewarm).
 //   art.cell, art.dpr              Current metrics.
 //   art.boardMargin                CSS px the board canvas extends beyond the cell area on every side
-//                                  (frame + side face + drop shadow). Integer.
+//                                  (frame + bottom face + drop shadow). Integer.
 //   art.frameWidth                 CSS px of visible frame beyond the cells (left / top / right).
-//   art.frameBottom                CSS px of visible frame below the last row (frame + its side face).
+//   art.frameBottom                CSS px of visible frame below the last row (frame + its bottom face).
 //   art.ready                      Promise, resolves once the number font is loaded (text sprites refresh
 //                                  by themselves; nothing to do).
 //   art.prewarm({ colors?, holes? })   Paints sprites now instead of on first use, e.g. during a level
-//       transition: colors = colour ids (default all 8), holes = [{ cells, c, axis, need }].
-//   art.setMarks(on), art.marks    Colour-blind mode (off by default): a per-colour symbol (♥ ▲ ★ ✚ drop ◆
-//       moon ●) on every cat's belly and as a faint emblem in every cell of the matching pits.
+//       transition: colors = colour ids (default all), holes = [{ cells, c, axis, need, next }].
+//   art.setMarks(on), art.marks    Colour-blind mode (off by default): a per-colour symbol on every cat's
+//       belly and as a faint emblem in every cell of the matching pits.
 //   art.clear()                    Drops every cached sprite (they are painted again on demand).
 //   art.cachePixels                Device px held by the sprite caches (diagnostics; capped at ~20 M).
 //
-//   art.renderBoard(level, into?) → canvas   Static board image: frame, floor tiles, walls (not crates,
-//       holes or cats). level = { w, h, ground: Uint8Array(w*h) } with 0 void, 1 floor, 2 wall,
-//       3 locked-crate cell (floor is drawn under it). The frame follows the outline of the non-void cells
-//       (inner corners included) and also fills void gaps only one cell wide. Adjacent walls merge into one
-//       block. The canvas has extra props cssWidth / cssHeight (= w*cell + 2*boardMargin,
-//       h*cell + 2*boardMargin) and margin. Pass the previous canvas as `into` to reuse its memory.
+//   art.renderBoard(level, into?) → canvas   Static board image: purple frame, floor tiles, walls (not
+//       crates, holes or cats). level = { w, h, ground: Uint8Array(w*h) } with 0 void, 1 floor, 2 wall,
+//       3 locked-crate cell (floor is drawn under it). The frame is a rounded slab around the whole w × h
+//       area; void cells show the purple frame material. The canvas has extra props cssWidth / cssHeight
+//       (= w*cell + 2*boardMargin, h*cell + 2*boardMargin) and margin. Pass the previous canvas as `into`
+//       to reuse its memory.
 //
 //   art.drawCrate(ctx, x, y, o)    Locked crate on the cell whose top-left is (x, y). o: { open = 0 (0..1:
 //       padlock shakes, pops open and flies off; crate shrinks and fades; nothing drawn at 1), t = seconds }.
 //
+//   art.drawTrail(ctx, x, y, colour, alpha = 1)   Soft tinted rounded square on the cell whose top-left is
+//       (x, y): what a dragged hole leaves behind for a moment. Draw under the holes.
+//
 //   art.drawHole(ctx, cells, x, y, colour, o)   Hole = pit with a rim, cells merged into one outline.
 //       cells = normalized [[dx,dy],...] (min 0; the same array object every frame is fastest);
 //       x, y = top-left CSS px of the shape origin cell (0,0) (fractional while sliding is fine).
-//       o: { need (badge number; no badge when ≤ 0),
+//       o: { need (tag number; no tag when ≤ 0),
+//            next = [] (colours of the layers still to come: one outer ring each, innermost = next one),
+//            change = 0, prev (0..1 right after the hole switched from colour `prev` to `colour`: the new
+//                         colour sweeps out from the tag over the old one, with a little pop),
 //            lifted = 0 (0..1 while dragged: coloured glow, brighter rim, 3.5% bigger),
 //            axis = null | 'h' | 'v' (chevrons at both ends of the pit, on the rim for 1-cell runs),
 //            closing = 0 (0..1: iris lid closes with a paw stamp, sparkles, then pops and shrinks away;
-//                         nothing drawn at 1; the badge fades out in the first 12%),
-//            pulse = 0 (1 right when a cat drops in, decaying to 0: jelly wobble + flash + badge pop),
-//            t = seconds, badge = true (false skips the badge: draw it later with drawHoleBadge, e.g. after
-//            the falling cats so they do not cover the number) }.
+//                         nothing drawn at 1; the tag fades out in the first 12%),
+//            pulse = 0 (1 right when a cat drops in, decaying to 0: jelly wobble + flash + tag pop),
+//            t = seconds, badge = true (false skips the tag: draw it later with drawHoleBadge, after the
+//            cats, so nothing ever covers the number) }.
+//   art.drawHoleBadge(ctx, cells, x, y, colour, need, o?)   Only the number tag: a rounded tag in the rim
+//       colour on the bottom-right corner of the shape's last cell (max dx + dy, ties → max dx), white
+//       number with a dark outline. o: { pulse, change (pops), scale, alpha }.
+//   art.badgeAt(cells, need?) → [x, y]   Tag centre in cells relative to the shape origin.
+//   art.holeCenter(cells) → [cx, cy]   Visual centre in cells relative to the origin (centre of mass,
+//       snapped to the nearest cell centre when it falls outside the shape): aim particles / treats there.
 //   art.clipHole(ctx, cells, x, y, up = 0.65)   Intersects the clip with the pit interior plus the area
 //       straight above it (up = cells), so a falling cat sinks behind the near (lower) rim while its head
 //       may still stick out above the pit. Leaves the transform unchanged; wrap in ctx.save()/restore().
-//   art.drawHoleBadge(ctx, cells, x, y, colour, need, o?)   Only the number badge. o: { pulse, scale }.
-//   art.holeCenter(cells) → [cx, cy]   Badge / visual centre in cells relative to the origin (centre of mass,
-//       snapped to the nearest cell centre when the badge would not fit there).
 //
 //   art.drawCat(ctx, cx, cy, colour, o)   cx, cy = cell centre. o: {
-//       t = seconds (drives blink every 2–6 s, ear twitch, tail sway, breathing), seed = int (look + timing:
-//       fur pattern of 6, eye size, ear tilt, tail side and tip),
-//       mood = 'idle' | 'happy' (^ ^ eyes, open smile, wagging tail) | 'surprised' (wide eyes, O mouth),
+//       t = seconds (blink every 2–6 s, breathing, a mochi wobble now and then), seed = int (timing, eye size),
+//       mood = 'idle' | 'happy' (^ ^ eyes, open smile, little bounces) | 'surprised' (wide eyes, O mouth),
 //       blink = false (force closed eyes), hop = 0 (0..1 jump with squash & stretch; an idle cat looks happy
 //       while hopping), scale = 1, alpha = 1, rot = 0 (radians, about the cell centre),
 //       tint = 0 (0..1 darkens toward the colour's deep pit shade; the floor shadow fades with it),
 //       key = false (navy collar with a golden key charm), size = cell (draw as if the cell were this big),
 //       shadow = true (soft floor shadow) }.
+//     Each colour has its own little personality (purple: Siamese mask, white: fluffy with pale-blue
+//     shading, navy: odd eyes and a light muzzle, grey: tuxedo, brown: ear patch, yellow / orange / blue:
+//     tabby stripes, …).
 //   art.drawFallingCat(ctx, cells, hx, hy, cx, cy, colour, p, o?)   Convenience: clip + surprised hop, sink,
 //       shrink, tint and spin for progress p 0..1 (o: { t, seed, key }). drawCat inside clipHole works too.
 //   art.drawBox(ctx, cx, cy, o)    Cardboard box hiding a cat (neutral ears peek out, eyes glint, wiggles
@@ -93,41 +108,66 @@
 //   art.drawKey(ctx, cx, cy, o?)   The key charm alone, e.g. flying to a crate (o: { size = cell, rot, alpha }).
 //   art.drawSparkle(ctx, x, y, size, o?)   White 4-point star with a soft glow (size = CSS px; o: { rot, alpha }).
 //
-// Performance (tools/art-preview.mjs): a cat is 6 drawImage calls (shadow, tail, 2 ears, body+head, face),
-// +2 with a key; a hole is 1 plus its badge (+1–3 while lifted / pulsing / closing). Nothing is stroked per
-// frame except the closing iris. 8×10 board with 70 cats + 10 holes: ~0.5 ms JS and ~2 ms to rasterize per
-// frame in desktop headless Chrome.
+// Performance (tools/art-preview.mjs): a cat is 3 drawImage calls (shadow, body, face), +2 with a key;
+// a hole is 1 plus its tag (+1–3 while lifted / pulsing / closing / changing colour). Nothing is stroked
+// per frame except the closing iris.
 // ────────────────────────────────────────────────────────────────────────────────────────────────
 
 const TAU = Math.PI * 2;
 const EMPTY = Object.freeze({});
 
-/** Colour ids 0..7. Shades: light (muzzle, gloss), dark (shading), outline (lines), deep (pit interior). */
+/** Colour ids 0..11. Shades: light (bib, gloss), dark (shading), outline (lines), deep (pit interior). */
 export const PALETTE = Object.freeze([
-  Object.freeze({ name: 'red', main: '#FF4D5E', light: '#FFA3AC', dark: '#DE2C47', outline: '#9D1534', deep: '#4A0A1E' }),
-  Object.freeze({ name: 'orange', main: '#FF9A2E', light: '#FFCB8A', dark: '#E8701A', outline: '#A3460C', deep: '#561A06' }),
-  Object.freeze({ name: 'yellow', main: '#FFD23F', light: '#FFEC9E', dark: '#F2AA1E', outline: '#A86A0C', deep: '#4D3A05' }),
-  Object.freeze({ name: 'green', main: '#46D16B', light: '#A6EEB6', dark: '#22AA4E', outline: '#127238', deep: '#09381C' }),
-  Object.freeze({ name: 'cyan', main: '#2EC4E6', light: '#98E6F7', dark: '#1499C4', outline: '#0A658B', deep: '#053249' }),
-  Object.freeze({ name: 'blue', main: '#3D7BFF', light: '#A0C0FF', dark: '#2754DA', outline: '#17329A', deep: '#0B174F' }),
-  Object.freeze({ name: 'purple', main: '#A35CFF', light: '#D4B0FF', dark: '#7E3AE0', outline: '#521FA1', deep: '#280C54' }),
-  Object.freeze({ name: 'pink', main: '#FF6FC8', light: '#FFB6E4', dark: '#EA449F', outline: '#A41D6E', deep: '#4C0A34' }),
+  Object.freeze({ name: 'red', main: '#FF5466', light: '#FFD3CF', dark: '#DE3549', outline: '#8F1B30', deep: '#4E0C1A' }),
+  Object.freeze({ name: 'orange', main: '#FF9933', light: '#FFE0B8', dark: '#EA7418', outline: '#984708', deep: '#4F2006' }),
+  Object.freeze({ name: 'yellow', main: '#FFD43A', light: '#FFF5BE', dark: '#F0AC14', outline: '#916309', deep: '#4E3505' }),
+  Object.freeze({ name: 'lime', main: '#86D62A', light: '#E7F8B4', dark: '#62B312', outline: '#2E6A0A', deep: '#183A06' }),
+  Object.freeze({ name: 'cyan', main: '#36CBEA', light: '#D2F5FC', dark: '#17A2CB', outline: '#0A5E80', deep: '#06364C' }),
+  Object.freeze({ name: 'blue', main: '#3F86F2', light: '#C6DDFF', dark: '#2A67CF', outline: '#153C88', deep: '#0C1F4A' }),
+  Object.freeze({ name: 'purple', main: '#B377F5', light: '#EBD6FF', dark: '#9055DA', outline: '#4F2592', deep: '#2C1054' }),
+  Object.freeze({ name: 'pink', main: '#FF6EC1', light: '#FFD0EA', dark: '#E8499F', outline: '#981C66', deep: '#520C36' }),
+  Object.freeze({ name: 'white', main: '#FBFAFF', light: '#FFFFFF', dark: '#C8D5F2', outline: '#6A69A0', deep: '#394458' }),
+  Object.freeze({ name: 'navy', main: '#4B47C4', light: '#A9A6F6', dark: '#36329F', outline: '#1B1757', deep: '#110F38' }),
+  Object.freeze({ name: 'brown', main: '#C27B41', light: '#F7DFBF', dark: '#9F5D2A', outline: '#55300F', deep: '#2F1708' }),
+  Object.freeze({ name: 'grey', main: '#737A8D', light: '#EEF1F6', dark: '#585E70', outline: '#2A2D3A', deep: '#1B1D25' }),
 ]);
+const NC = PALETTE.length;
+const col = (c) => ((((c | 0) % NC) + NC) % NC);
+
+/**
+ * Per-colour personality. bib: light front patch ('heart' | 'drop' | 'round' | 'muzzle' | 'tux' | 'none');
+ * eyes: 0 dark, 1 blue, 2 pale (on a mask), 3 odd (gold + blue); ear: inner-ear colour.
+ */
+const LOOKS = [
+  { bib: 'heart', eyes: 0 }, // red
+  { bib: 'heart', eyes: 0, stripes: '#E06A10' }, // orange tabby
+  { bib: 'round', eyes: 0, stripes: '#F09A1E' }, // yellow tabby
+  { bib: 'heart', eyes: 0 }, // lime
+  { bib: 'drop', eyes: 0, freckles: true }, // cyan
+  { bib: 'drop', eyes: 0, stripes: '#2457B8' }, // blue tabby
+  { bib: 'none', eyes: 2, mask: true }, // purple Siamese
+  { bib: 'heart', eyes: 0, sheen: true }, // pink
+  { bib: 'none', eyes: 1, fluffy: true, shade: '#CDDBF6' }, // white fluff
+  { bib: 'muzzle', eyes: 3, ear: '#FFCF57' }, // navy, odd eyes
+  { bib: 'heart', eyes: 0, patch: true }, // brown
+  { bib: 'tux', eyes: 0, socks: true }, // grey tuxedo
+];
 
 // ───────── shared constants (cell units unless noted) ─────────
-const INK = '#33203F'; // face lines
-const BLUSH = 'rgba(255, 102, 140, 0.42)';
-const NOSE = '#FF86A6';
-const NOSE_LINE = '#C24A72';
+const INK = '#2E2340'; // face lines
+const BLUSH = 'rgba(255, 105, 145, 0.42)';
+const NOSE = '#FF7FA6';
+const NOSE_LINE = '#C9476F';
+const EAR_PINK = '#FF9FC2';
 const GOLD = { light: '#FFF2A8', main: '#FFC93C', dark: '#E39612', outline: '#8A5406' };
-const COLLAR = { main: '#4B3A7A', light: '#7E6BB8', outline: '#241838' }; // neutral: never competes with fur colours
+const COLLAR = { main: '#3F3270', light: '#7E6BB8', outline: '#1E1636' }; // neutral: never competes with fur colours
 const KRAFT = { light: '#F6CD94', main: '#E3A762', dark: '#C4833F', outline: '#7A461C', inside: '#5A3316', tape: '#F2D9A8' };
 const WOOD = { light: '#EDBB7C', main: '#D39556', dark: '#AE6E35', outline: '#6A3D16', grain: '#B97A3F' };
 const STEEL = { main: '#A9B4CC', dark: '#6E7894', outline: '#454D66' };
-const FRAME = { top1: '#FFD596', top2: '#F3AE5E', side: '#CF8040', side2: '#B76A2E', outline: '#8C4E20', lip: '#C47A38' };
-const FLOOR_A = '#FFF4E4';
-const FLOOR_B = '#FBE7CC';
-const WALL = { top1: '#EEEAFC', top2: '#D6CEF2', side: '#ADA1DC', side2: '#9184C8', outline: '#6C5FA6' };
+const FRAME = { top1: '#AC86F5', top2: '#8D5CE5', hi: '#D2BCFF', side1: '#6A3CC2', side2: '#50289D', outline: '#2F1468', inner: '#3D1B85', void: '#7C4BD6' };
+const FLOOR = { a: '#F6D9C0', b: '#EFCDB1', grid: '#FBE9DA' };
+const WALL = { top1: '#EDE3FF', top2: '#D2BFF8', side: '#A486E2', side2: '#8667CE', outline: '#45278E' };
+const TAG_INK = '#2C2347'; // outline of the white tag numbers
 const SHADOW_RGB = '74, 40, 110';
 
 const FONT_NAME = 'MeowDropNum';
@@ -135,30 +175,28 @@ const FONT_STACK = `${FONT_NAME}, Nunito, "Arial Rounded MT Bold", ui-rounded, "
 const FONT_URL = '../../fonts/nunito-latin-900-normal.woff2';
 
 // Cat layout (origin = cell centre).
-const EAR_X = 0.195;
-const EAR_Y = -0.262;
-const EAR_ROT = 0.4;
-const TAIL_X = 0.17;
-const TAIL_Y = 0.335;
-const FOOT = 0.45;
-const SHADOW_Y = 0.43;
-const KEY_Y = 0.217; // key ring hangs from the collar here
-const HOP_H = 0.36;
-const NV = 6; // base (fur pattern) variants
+const FOOT = 0.46;
+const SHADOW_Y = 0.455;
+const KEY_Y = 0.045; // key ring hangs from the collar here
+const HOP_H = 0.34;
 
 // Hole geometry.
-const H_IN = 0.04; // gap between the cell edge and the rim
-const H_RIM = 0.135; // rim width
-const H_R = 0.26; // outer convex corner radius
-const H_r = 0.1; // outer concave corner radius
-const H_RI = 0.15; // pit convex radius
-const H_rI = 0.22; // pit concave radius
-const H_PAD = 0.3; // sprite padding (shadow / glow)
+const H_IN = 0.035; // gap between the cell edge and the rim
+const H_RIM = 0.1; // rim width
+const H_R = 0.22; // outer convex corner radius
+const H_r = 0.08; // outer concave corner radius
+const H_RI = 0.12; // pit convex radius
+const H_rI = 0.18; // pit concave radius
+const H_PAD = 0.34; // sprite padding (rings / shadow / glow)
+const RING = 0.055; // width of one "next layer" ring
+const MAX_RINGS = 3;
+const TAG_H = 0.36;
+const TAG_W = [0.32, 0.42, 0.52];
 
 // Board.
-const FRAME_W = 0.34;
-const FRAME_D = 0.12;
-const FLOOR_R = 0.2;
+const FRAME_W = 0.32;
+const FRAME_D = 0.16;
+const FRAME_R = 0.4;
 
 // ───────── small helpers ─────────
 const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
@@ -373,12 +411,13 @@ function inverse(path, x0, y0, x1, y1) {
 }
 
 /**
- * Colour-blind marks: one simple symbol per colour id (heart, triangle, star, plus, drop, diamond, moon,
- * dot), centred at (x, y), about s across. Adds a fillable sub-path to p (fill with 'evenodd' for the moon).
+ * Colour-blind marks: one simple symbol per colour id (heart, triangle, star, plus, drop, diamond, moon, dot,
+ * ring, square, hexagon, cross), centred at (x, y), about s across. Adds a fillable sub-path to p (fill with
+ * 'evenodd': the moon and the ring are cut-outs).
  */
 function symbolPath(p, k, x, y, s) {
   const r = s / 2;
-  switch (k & 7) {
+  switch (col(k)) {
     case 0: // heart
       p.moveTo(x, y + r * 0.9);
       p.bezierCurveTo(x - r * 1.25, y + r * 0.05, x - r * 0.75, y - r * 1.05, x, y - r * 0.35);
@@ -432,9 +471,41 @@ function symbolPath(p, k, x, y, s) {
       p.moveTo(x + r * 1.25, y - r * 0.3);
       p.arc(x + r * 0.45, y - r * 0.3, r * 0.8, 0, TAU);
       break;
-    default: // dot
+    case 7: // dot
       p.moveTo(x + r * 0.8, y);
       p.arc(x, y, r * 0.8, 0, TAU);
+      break;
+    case 8: // ring
+      p.moveTo(x + r * 0.95, y);
+      p.arc(x, y, r * 0.95, 0, TAU);
+      p.moveTo(x + r * 0.5, y);
+      p.arc(x, y, r * 0.5, 0, TAU);
+      break;
+    case 9: // square
+      p.moveTo(x - r * 0.75, y - r * 0.75);
+      p.lineTo(x + r * 0.75, y - r * 0.75);
+      p.lineTo(x + r * 0.75, y + r * 0.75);
+      p.lineTo(x - r * 0.75, y + r * 0.75);
+      break;
+    case 10: // hexagon
+      for (let i = 0; i < 6; i++) {
+        const a = (i * Math.PI) / 3;
+        if (i) p.lineTo(x + r * Math.cos(a), y + r * Math.sin(a));
+        else p.moveTo(x + r, y);
+      }
+      break;
+    default: { // cross
+      const a = r * 0.3;
+      const b = r * 0.95;
+      const q = Math.SQRT1_2;
+      const pts = [[-a, -b], [a, -b], [a, -a], [b, -a], [b, a], [a, a], [a, b], [-a, b], [-a, a], [-b, a], [-b, -a], [-a, -a]];
+      pts.forEach(([px, py], i) => {
+        const rx = x + (px - py) * q;
+        const ry = y + (px + py) * q;
+        if (i) p.lineTo(rx, ry);
+        else p.moveTo(rx, ry);
+      });
+    }
   }
   p.closePath();
 }
@@ -463,7 +534,7 @@ function loadFont() {
   return fontPromise;
 }
 
-// ───────── per-cat look and timing from its seed ─────────
+// ───────── per-cat timing (and eye size) from its seed ─────────
 const paramCache = new Map();
 function catParams(seed) {
   let p = paramCache.get(seed);
@@ -471,25 +542,17 @@ function catParams(seed) {
   const s = Number.isInteger(seed) ? seed | 0 : Math.floor((seed || 0) * 1e6) | 0;
   const r = (k) => hash01(s, k);
   p = {
-    v: Math.floor(r(1) * NV),
     big: r(2) < 0.45 ? 1 : 0,
-    side: r(3) < 0.5 ? 1 : -1,
-    tip: r(4) < 0.4 ? 1 : 0,
-    el: (r(5) - 0.5) * 0.24,
-    er: (r(6) - 0.5) * 0.24,
     blinkP: 2.2 + r(7) * 3.8,
     blinkO: r(8) * 7,
     dbl: r(9) < 0.3,
     bw: TAU / (2.3 + r(10) * 1.1),
     bp: r(11) * TAU,
-    tw: TAU / (2.1 + r(12) * 1.5),
-    tp: r(13) * TAU,
-    ta: 0.1 + r(14) * 0.08,
-    twP: 5.5 + r(15) * 7,
-    twO: r(16) * 12,
-    twS: r(17) < 0.5 ? 0 : 1,
     kp: r(18) * TAU,
-    wig: 3.5 + r(19) * 4,
+    wig: 4.5 + r(19) * 5, // mochi wobble period (s)
+    wigO: r(20) * 9,
+    hp: r(21) * TAU, // happy bounce phase
+    tp: r(13) * TAU,
   };
   if (paramCache.size > 4000) paramCache.clear();
   paramCache.set(seed, p);
@@ -660,18 +723,33 @@ export function createArt() {
     return scratch.measureText(str).width / S;
   }
 
-  /** Cached number badge for a hole of colour c. */
+  /** Width (cells) of the number tag for n. */
+  function tagW(n) {
+    return TAG_W[Math.min(3, String(n).length) - 1];
+  }
+
+  /** Cached number tag for a hole of colour c: a rim-coloured rounded tag, white number with a dark outline. */
   function badgeSp(n, c) {
     const key = 'b' + n + '|' + c;
     let sp = textC.get(key);
     if (sp) return sp;
     const str = String(n);
-    const size = str.length === 1 ? 0.47 : str.length === 2 ? 0.4 : 0.31;
-    const w = measureCells(str, size) / 2 + size * 0.3;
+    const tw = tagW(n);
     const P = PALETTE[c];
     trim(); // before creating: never evicts the sprite we are about to return
-    sp = sprite(-w, -size * 0.75, w, size * 0.8, (g) =>
-      paintText(g, str, 0, 0, size, ['#FFFFFF', mix(P.light, '#FFFFFF', 0.55)], P.outline, 0.13, rgba(P.deep, 0.9)));
+    sp = sprite(-tw / 2 - 0.05, -TAG_H / 2 - 0.05, tw / 2 + 0.05, TAG_H / 2 + 0.07, (g) => {
+      const p = new Path2D();
+      rrect(p, -tw / 2, -TAG_H / 2, tw, TAG_H, 0.1);
+      g.lineWidth = 2 * lw * 1.05;
+      g.strokeStyle = P.outline;
+      g.stroke(p);
+      const tg = g.createLinearGradient(0, -TAG_H / 2, 0, TAG_H / 2);
+      tg.addColorStop(0, mix(P.main, P.light, 0.4));
+      tg.addColorStop(1, P.main);
+      g.fillStyle = tg;
+      g.fill(p);
+      paintText(g, str, 0, 0.004, str.length >= 3 ? 0.22 : 0.27, '#FFFFFF', TAG_INK, 0.17, null);
+    });
     textC.set(key, sp);
     return sp;
   }
@@ -690,347 +768,333 @@ export function createArt() {
   }
 
   // ═════════════════════════════════════════ cats ═════════════════════════════════════════
-  function headPath() {
-    const p = new Path2D();
-    p.moveTo(0, -0.365);
-    p.bezierCurveTo(0.215, -0.365, 0.36, -0.24, 0.36, -0.05);
-    p.bezierCurveTo(0.36, 0.115, 0.215, 0.192, 0, 0.192);
-    p.bezierCurveTo(-0.215, 0.192, -0.36, 0.115, -0.36, -0.05);
-    p.bezierCurveTo(-0.36, -0.24, -0.215, -0.365, 0, -0.365);
+  // Mochi cats: one chubby loaf silhouette with the ears built in, filling ~90% of the cell. A body sprite
+  // per colour (fur, bib, markings, legs, whiskers) and face sprites per eye style / eye size / state.
+
+  /** Smooth closed outline through the midpoints of a control polygon (rounded, B-spline-like). */
+  function smoothPath(p, pts) {
+    const n = pts.length;
+    const mx = (i) => (pts[i % n][0] + pts[(i + 1) % n][0]) / 2;
+    const my = (i) => (pts[i % n][1] + pts[(i + 1) % n][1]) / 2;
+    p.moveTo(mx(n - 1), my(n - 1));
+    for (let i = 0; i < n; i++) p.quadraticCurveTo(pts[i][0], pts[i][1], mx(i), my(i));
     p.closePath();
+  }
+
+  // Right half of the loaf, clockwise from the top centre (the left half is mirrored).
+  const LOAF = [
+    [0, -0.372], [0.106, -0.37], [0.176, -0.382], [0.273, -0.462], [0.326, -0.497], [0.352, -0.44], [0.363, -0.3],
+    [0.373, -0.17], [0.396, -0.085], [0.377, -0.045], [0.385, 0.1], [0.391, 0.27], [0.382, 0.405],
+    [0.326, 0.465], [0.176, 0.47],
+  ];
+  const LOAF_FLUFFY = [
+    [0, -0.372], [0.106, -0.37], [0.176, -0.382], [0.273, -0.462], [0.326, -0.497], [0.352, -0.44], [0.363, -0.3],
+    [0.368, -0.215], [0.4, -0.17], [0.375, -0.13], [0.405, -0.08], [0.378, -0.04], [0.4, 0.01], [0.382, 0.06],
+    [0.391, 0.27], [0.382, 0.405], [0.326, 0.465], [0.176, 0.47],
+  ];
+  function loafPath(fluffy) {
+    const right = fluffy ? LOAF_FLUFFY : LOAF;
+    const left = right.slice(1).reverse().map(([x, y]) => [-x, y]);
+    const p = new Path2D();
+    smoothPath(p, [...right, [0, 0.47], ...left]);
     return p;
   }
 
-  function paintBase(g, P, v) {
-    const L = lw;
-    const tabby = v === 1 || v === 5;
-    const socks = v === 4 || v === 5;
-    const patch = v === 2 ? -1 : v === 3 ? 1 : 0;
-    const blaze = v === 4;
-    const fine = S >= 96;
+  function bibPath(kind) {
+    const p = new Path2D();
+    if (kind === 'heart' || kind === 'tux') {
+      p.moveTo(0, -0.02);
+      p.bezierCurveTo(-0.063, -0.125, -0.236, -0.105, -0.223, 0.045);
+      p.bezierCurveTo(-0.212, 0.175, -0.077, 0.255, 0, 0.355);
+      p.bezierCurveTo(0.077, 0.255, 0.212, 0.175, 0.223, 0.045);
+      p.bezierCurveTo(0.236, -0.105, 0.063, -0.125, 0, -0.02);
+      p.closePath();
+    } else if (kind === 'drop') {
+      p.moveTo(0, -0.085);
+      p.bezierCurveTo(0.099, -0.01, 0.194, 0.12, 0.153, 0.245);
+      p.quadraticCurveTo(0.09, 0.345, 0, 0.35);
+      p.quadraticCurveTo(-0.09, 0.345, -0.153, 0.245);
+      p.bezierCurveTo(-0.194, 0.12, -0.099, -0.01, 0, -0.085);
+      p.closePath();
+    } else if (kind === 'round') {
+      ell(p, 0, 0.12, 0.212, 0.235);
+      ell(p, 0, -0.04, 0.117, 0.08);
+    } else if (kind === 'muzzle') {
+      ell(p, 0, -0.045, 0.113, 0.07);
+    }
+    return p;
+  }
 
-    // Body and haunches (one silhouette, outlined together).
-    const body = new Path2D();
-    body.moveTo(-0.165, 0.03);
-    body.bezierCurveTo(-0.235, 0.12, -0.268, 0.3, -0.22, 0.395);
-    body.quadraticCurveTo(-0.165, 0.455, 0, 0.455);
-    body.quadraticCurveTo(0.165, 0.455, 0.22, 0.395);
-    body.bezierCurveTo(0.268, 0.3, 0.235, 0.12, 0.165, 0.03);
-    body.closePath();
-    const hl = new Path2D();
-    ell(hl, -0.205, 0.372, 0.098, 0.083);
-    const hr = new Path2D();
-    ell(hr, 0.205, 0.372, 0.098, 0.083);
+  function paintBody(g, c) {
+    const P = PALETTE[c];
+    const look = LOOKS[c];
+    const L = lw;
+    const body = loafPath(look.fluffy);
     g.lineWidth = 2 * L;
     g.strokeStyle = P.outline;
     g.stroke(body);
-    g.stroke(hl);
-    g.stroke(hr);
-    const bg = g.createLinearGradient(0, 0.06, 0, 0.46);
-    bg.addColorStop(0, P.main);
-    bg.addColorStop(1, mix(P.main, P.dark, 0.6));
-    g.fillStyle = bg;
+    const fg = g.createLinearGradient(0, -0.5, 0, 0.47);
+    fg.addColorStop(0, mix(P.main, P.light, 0.2));
+    fg.addColorStop(0.5, P.main);
+    fg.addColorStop(1, mix(P.main, P.dark, 0.3));
+    g.fillStyle = fg;
     g.fill(body);
-    g.fill(hl);
-    g.fill(hr);
-    // haunch creases
-    g.strokeStyle = rgba(P.outline, 0.4);
-    g.lineWidth = L * 0.75;
-    g.beginPath();
-    g.arc(-0.205, 0.372, 0.07, -2.5, -1.0);
-    g.moveTo(0.205 + 0.07 * Math.cos(-2.14), 0.372 + 0.07 * Math.sin(-2.14));
-    g.arc(0.205, 0.372, 0.07, -2.14, -0.64);
-    g.stroke();
-    // belly
-    g.fillStyle = P.light;
-    g.beginPath();
-    ell(g, 0, 0.318, 0.112, 0.098);
-    g.fill();
-    if (marks) {
-      const sp = new Path2D();
-      symbolPath(sp, PALETTE.indexOf(P), 0, 0.293, 0.13);
-      g.fillStyle = P.dark;
-      g.fill(sp, 'evenodd');
-    }
-    // chin shadow
-    g.fillStyle = rgba(P.outline, 0.22);
-    g.beginPath();
-    ell(g, 0, 0.205, 0.19, 0.05);
-    g.fill();
-    // front paws
-    for (const s of [-1, 1]) {
-      const pp = new Path2D();
-      ell(pp, s * 0.088, 0.412, 0.073, 0.054);
-      g.lineWidth = 2 * L;
-      g.strokeStyle = P.outline;
-      g.stroke(pp);
-      g.fillStyle = socks ? P.light : mix(P.main, P.light, 0.3);
-      g.fill(pp);
-      if (fine) {
-        g.strokeStyle = rgba(P.outline, 0.45);
-        g.lineWidth = L * 0.6;
-        g.beginPath();
-        g.moveTo(s * 0.088 - 0.022, 0.43);
-        g.lineTo(s * 0.088 - 0.022, 0.452);
-        g.moveTo(s * 0.088 + 0.022, 0.43);
-        g.lineTo(s * 0.088 + 0.022, 0.452);
-        g.stroke();
-      }
-    }
-
-    // Head.
-    const head = headPath();
-    g.lineWidth = 2 * L;
-    g.strokeStyle = P.outline;
-    g.stroke(head);
-    const hg = g.createRadialGradient(-0.1, -0.2, 0.02, 0, -0.06, 0.43);
-    hg.addColorStop(0, mix(P.main, P.light, 0.5));
-    hg.addColorStop(0.5, P.main);
-    hg.addColorStop(1, mix(P.main, P.dark, 0.55));
-    g.fillStyle = hg;
-    g.fill(head);
     g.save();
-    g.clip(head);
-    if (patch) {
-      g.fillStyle = P.light;
+    g.clip(body);
+    // inner ears
+    g.fillStyle = look.ear || EAR_PINK;
+    g.strokeStyle = look.ear || EAR_PINK;
+    g.lineWidth = 0.03;
+    g.beginPath();
+    for (const s of [-1, 1]) {
+      g.moveTo(s * 0.207, -0.372);
+      g.lineTo(s * 0.31, -0.447);
+      g.lineTo(s * 0.339, -0.318);
+      g.closePath();
+    }
+    g.fill();
+    g.stroke();
+    // markings under the bib
+    if (look.patch) {
+      g.fillStyle = mix(P.dark, P.outline, 0.3);
       g.beginPath();
-      ell(g, patch * 0.17, -0.12, 0.16, 0.15, patch * 0.35);
+      ell(g, -0.23, -0.31, 0.2, 0.17, 0.35);
       g.fill();
     }
-    if (blaze) {
-      g.fillStyle = P.light;
+    if (look.sheen) {
+      g.fillStyle = rgba(P.light, 0.4);
       g.beginPath();
-      g.moveTo(0, -0.37);
-      g.bezierCurveTo(0.05, -0.25, 0.04, -0.12, 0.075, 0.0);
-      g.lineTo(-0.075, 0.0);
-      g.bezierCurveTo(-0.04, -0.12, -0.05, -0.25, 0, -0.37);
+      ell(g, -0.215, -0.08, 0.075, 0.2, 0.35);
       g.fill();
     }
-    if (tabby) {
-      g.strokeStyle = mix(P.dark, P.outline, 0.35);
+    if (look.stripes) {
+      g.strokeStyle = look.stripes;
       g.lineWidth = 0.034;
       g.beginPath();
-      g.moveTo(0, -0.37);
-      g.lineTo(0, -0.27);
-      g.moveTo(-0.075, -0.36);
-      g.lineTo(-0.064, -0.29);
-      g.moveTo(0.075, -0.36);
-      g.lineTo(0.064, -0.29);
-      // cheek stripes
-      g.moveTo(-0.37, -0.06);
-      g.lineTo(-0.3, -0.05);
-      g.moveTo(-0.37, 0.0);
-      g.lineTo(-0.31, 0.005);
-      g.moveTo(0.37, -0.06);
-      g.lineTo(0.3, -0.05);
-      g.moveTo(0.37, 0.0);
-      g.lineTo(0.31, 0.005);
+      g.moveTo(0, -0.372);
+      g.lineTo(0, -0.285);
+      g.moveTo(-0.075, -0.366);
+      g.lineTo(-0.062, -0.3);
+      g.moveTo(0.075, -0.366);
+      g.lineTo(0.062, -0.3);
       g.stroke();
     }
-    // muzzle
-    g.fillStyle = P.light;
+    if (look.mask) {
+      g.fillStyle = mix(P.dark, P.outline, 0.5);
+      g.beginPath();
+      rrect(g, -0.262, -0.218, 0.524, 0.15, 0.075);
+      g.fill();
+    }
+    // bib
+    if (look.bib !== 'none') {
+      g.fillStyle = look.bib === 'tux' ? '#F7F8FC' : P.light;
+      g.fill(bibPath(look.bib));
+      if (look.bib === 'tux') {
+        g.fillStyle = P.light;
+        g.fill(bibPath('muzzle'));
+      }
+    }
+    if (look.freckles) {
+      g.fillStyle = rgba(P.dark, 0.7);
+      for (const [fx, fy] of [[-0.27, -0.015], [-0.3, 0.03], [-0.245, 0.04], [0.27, -0.015], [0.3, 0.03], [0.245, 0.04]]) {
+        g.beginPath();
+        ell(g, fx, fy, 0.012, 0.012);
+        g.fill();
+      }
+    }
+    // lower-body shade (pale blue on the white cat)
+    const sh = g.createLinearGradient(0, look.shade ? 0.12 : 0.23, 0, 0.42);
+    const shade = look.shade || P.dark;
+    sh.addColorStop(0, rgba(shade, 0));
+    sh.addColorStop(1, rgba(shade, look.shade ? 0.95 : 0.6));
+    g.fillStyle = sh;
+    g.fillRect(-0.5, 0.1, 1, 0.4);
+    if (look.socks) {
+      g.fillStyle = '#F7F8FC';
+      g.beginPath();
+      ell(g, -0.075, 0.43, 0.075, 0.055);
+      ell(g, 0.075, 0.43, 0.075, 0.055);
+      g.fill();
+    }
+    // legs: front paws meeting at the bottom centre, hind legs at the sides
+    g.strokeStyle = P.outline;
+    g.lineWidth = L * 0.9;
     g.beginPath();
-    ell(g, -0.068, 0.078, 0.094, 0.07);
-    ell(g, 0.068, 0.078, 0.094, 0.07);
-    ell(g, 0, 0.115, 0.07, 0.05);
-    g.fill();
-    // lower-face shade + top light
-    const sg = g.createLinearGradient(0, -0.37, 0, 0.2);
-    sg.addColorStop(0, 'rgba(255,255,255,0.16)');
-    sg.addColorStop(0.35, 'rgba(255,255,255,0)');
-    sg.addColorStop(0.8, rgba(P.dark, 0));
-    sg.addColorStop(1, rgba(P.dark, 0.28));
-    g.fillStyle = sg;
-    g.fillRect(-0.4, -0.4, 0.8, 0.62);
+    g.moveTo(-0.13, 0.3);
+    g.quadraticCurveTo(-0.1, 0.41, -0.032, 0.462);
+    g.moveTo(0.13, 0.3);
+    g.quadraticCurveTo(0.1, 0.41, 0.032, 0.462);
+    g.moveTo(-0.034, 0.46);
+    g.lineTo(0, 0.432);
+    g.lineTo(0.034, 0.46);
+    g.moveTo(-0.28, 0.285);
+    g.quadraticCurveTo(-0.265, 0.395, -0.205, 0.46);
+    g.moveTo(0.28, 0.285);
+    g.quadraticCurveTo(0.265, 0.395, 0.205, 0.46);
+    g.stroke();
+    if (marks) {
+      const sp = new Path2D();
+      symbolPath(sp, c, 0, 0.2, 0.15);
+      g.fillStyle = c === 8 ? rgba(P.outline, 0.6) : look.bib === 'none' || look.bib === 'muzzle' ? rgba(P.light, 0.95) : P.dark;
+      g.fill(sp, 'evenodd');
+    }
     g.restore();
-    // whiskers
-    g.strokeStyle = rgba(P.outline, 0.72);
-    g.lineWidth = L * 0.72;
+    // whiskers poke out a little
+    g.strokeStyle = rgba(P.outline, 0.75);
+    g.lineWidth = L * 0.65;
     g.beginPath();
     for (const s of [-1, 1]) {
-      g.moveTo(s * 0.24, 0.05);
-      g.quadraticCurveTo(s * 0.33, 0.025, s * 0.405, 0.022);
-      g.moveTo(s * 0.245, 0.09);
-      g.quadraticCurveTo(s * 0.33, 0.095, s * 0.4, 0.112);
+      g.moveTo(s * 0.28, -0.085);
+      g.lineTo(s * 0.43, -0.11);
+      g.moveTo(s * 0.28, -0.05);
+      g.lineTo(s * 0.432, -0.045);
     }
     g.stroke();
-    // gloss
-    g.fillStyle = 'rgba(255,255,255,0.55)';
+    // soft gloss
+    g.fillStyle = 'rgba(255,255,255,0.4)';
     g.beginPath();
-    ell(g, -0.17, -0.245, 0.078, 0.038, -0.55);
-    g.fill();
-    g.fillStyle = 'rgba(255,255,255,0.45)';
-    g.beginPath();
-    ell(g, -0.255, -0.16, 0.02, 0.02);
+    ell(g, -0.22, -0.27, 0.055, 0.026, -0.55);
     g.fill();
   }
 
-  function paintEar(g, P) {
-    const L = lw;
-    const ear = new Path2D();
-    ear.moveTo(-0.13, 0.075);
-    ear.arcTo(0, -0.235, 0.13, 0.075, 0.045);
-    ear.lineTo(0.13, 0.075);
-    ear.closePath();
-    g.lineWidth = 2 * L;
-    g.strokeStyle = P.outline;
-    g.stroke(ear);
-    const eg = g.createLinearGradient(0, -0.17, 0, 0.07);
-    eg.addColorStop(0, mix(P.main, P.dark, 0.25));
-    eg.addColorStop(1, P.main);
-    g.fillStyle = eg;
-    g.fill(ear);
-    const inner = new Path2D();
-    inner.moveTo(-0.074, 0.06);
-    inner.arcTo(0, -0.15, 0.074, 0.06, 0.026);
-    inner.lineTo(0.074, 0.06);
-    inner.closePath();
-    const ig = g.createLinearGradient(0, -0.1, 0, 0.06);
-    ig.addColorStop(0, '#FF8FB2');
-    ig.addColorStop(1, '#FFC4D6');
-    g.fillStyle = ig;
-    g.fill(inner);
-  }
+  const EYES = [
+    { l: '#2A1F3D', r: '#2A1F3D', line: INK },
+    { l: '#2C3B92', r: '#2C3B92', line: '#3B3F7A' },
+    { l: '#C8F4FF', r: '#C8F4FF', line: '#E4DAFF', pupil: '#3C6FA8' },
+    { l: '#FFD54A', r: '#7AD6FF', line: '#E8E2FF', pupil: '#221A3A' },
+  ];
 
-  function paintTail(g, P, tip) {
+  function paintFace(g, style, big, state) {
     const L = lw;
-    const W = 0.088;
-    const t = new Path2D();
-    t.moveTo(-0.03, 0.025);
-    t.bezierCurveTo(0.11, 0.055, 0.245, -0.02, 0.238, -0.15);
-    t.bezierCurveTo(0.233, -0.24, 0.16, -0.28, 0.12, -0.235);
-    g.strokeStyle = P.outline;
-    g.lineWidth = W + 2 * L;
-    g.stroke(t);
-    g.strokeStyle = P.main;
-    g.lineWidth = W;
-    g.stroke(t);
-    if (tip) {
-      const tp = new Path2D();
-      tp.moveTo(0.228, -0.205);
-      tp.bezierCurveTo(0.212, -0.25, 0.16, -0.275, 0.12, -0.235);
-      g.strokeStyle = P.light;
-      g.stroke(tp);
-    }
-    g.save();
-    g.translate(-0.014, -0.012);
-    g.strokeStyle = 'rgba(255,255,255,0.3)';
-    g.lineWidth = W * 0.28;
-    const hl = new Path2D();
-    hl.moveTo(0.06, 0.035);
-    hl.bezierCurveTo(0.15, 0.04, 0.235, -0.03, 0.232, -0.13);
-    g.stroke(hl);
-    g.restore();
-  }
-
-  function paintFace(g, big, state) {
-    const L = lw;
-    const ex = 0.135;
-    const ey = -0.035;
-    const rx = big ? 0.072 : 0.064;
-    const ry = big ? 0.088 : 0.079;
+    const E = EYES[style];
+    const ex = 0.128;
+    const ey = -0.13;
+    const rx = big ? 0.054 : 0.048;
+    const ry = big ? 0.064 : 0.057;
     g.fillStyle = BLUSH;
     g.beginPath();
-    ell(g, -0.218, 0.062, 0.056, 0.033);
-    ell(g, 0.218, 0.062, 0.056, 0.033);
+    ell(g, -0.228, -0.05, 0.045, 0.026);
+    ell(g, 0.228, -0.05, 0.045, 0.026);
     g.fill();
-    g.strokeStyle = INK;
-    g.fillStyle = INK;
     for (const s of [-1, 1]) {
       const x = s * ex;
       if (state === FACE_OPEN) {
-        const eg = g.createLinearGradient(0, ey - ry, 0, ey + ry);
-        eg.addColorStop(0, '#24142F');
-        eg.addColorStop(0.55, '#36204A');
-        eg.addColorStop(1, '#6B4FA0');
-        g.fillStyle = eg;
+        g.fillStyle = s < 0 ? E.l : E.r;
         g.beginPath();
         ell(g, x, ey, rx, ry);
         g.fill();
+        if (E.pupil) {
+          g.fillStyle = E.pupil;
+          g.beginPath();
+          ell(g, x, ey + ry * 0.12, rx * 0.42, ry * 0.62);
+          g.fill();
+        }
         g.fillStyle = '#FFFFFF';
         g.beginPath();
-        ell(g, x - rx * 0.28, ey - ry * 0.36, rx * 0.44, rx * 0.44);
+        ell(g, x - rx * 0.3, ey - ry * 0.35, rx * 0.4, rx * 0.4);
         g.fill();
         g.beginPath();
-        ell(g, x + rx * 0.4, ey + ry * 0.42, rx * 0.18, rx * 0.18);
+        ell(g, x + rx * 0.38, ey + ry * 0.4, rx * 0.17, rx * 0.17);
         g.fill();
       } else if (state === FACE_CLOSED) {
-        g.lineWidth = L * 1.25;
+        g.strokeStyle = E.line;
+        g.lineWidth = L * 1.2;
         g.beginPath();
-        g.moveTo(x - rx * 1.05, ey + 0.01);
-        g.quadraticCurveTo(x, ey + 0.065, x + rx * 1.05, ey + 0.01);
+        g.moveTo(x - rx * 1.05, ey + 0.004);
+        g.quadraticCurveTo(x, ey + 0.05, x + rx * 1.05, ey + 0.004);
         g.stroke();
       } else if (state === FACE_HAPPY) {
-        g.lineWidth = L * 1.45;
+        g.strokeStyle = E.line;
+        g.lineWidth = L * 1.35;
         g.beginPath();
-        g.moveTo(x - rx * 1.0, ey + 0.03);
-        g.quadraticCurveTo(x, ey - 0.07, x + rx * 1.0, ey + 0.03);
+        g.moveTo(x - rx * 1.0, ey + 0.025);
+        g.quadraticCurveTo(x, ey - 0.06, x + rx * 1.0, ey + 0.025);
         g.stroke();
       } else {
-        const r = ry * 1.02;
+        const r = ry * 1.05;
         g.fillStyle = '#FFFFFF';
-        g.lineWidth = L * 0.9;
+        g.strokeStyle = INK;
+        g.lineWidth = L * 0.85;
         g.beginPath();
-        ell(g, x, ey, r * 0.92, r);
+        ell(g, x, ey, r * 0.9, r);
         g.fill();
         g.stroke();
-        g.fillStyle = '#24142F';
+        g.fillStyle = '#24182F';
         g.beginPath();
-        ell(g, x, ey + 0.006, r * 0.5, r * 0.55);
+        ell(g, x, ey + 0.004, r * 0.46, r * 0.52);
         g.fill();
         g.fillStyle = '#FFFFFF';
         g.beginPath();
-        ell(g, x - r * 0.18, ey - r * 0.2, r * 0.17, r * 0.17);
+        ell(g, x - r * 0.16, ey - r * 0.2, r * 0.16, r * 0.16);
         g.fill();
       }
     }
     // nose
     g.fillStyle = NOSE;
     g.strokeStyle = NOSE_LINE;
-    g.lineWidth = L * 0.55;
+    g.lineWidth = L * 0.5;
     g.beginPath();
-    g.moveTo(-0.03, 0.025);
-    g.quadraticCurveTo(0, 0.017, 0.03, 0.025);
-    g.quadraticCurveTo(0.012, 0.055, 0, 0.056);
-    g.quadraticCurveTo(-0.012, 0.055, -0.03, 0.025);
+    g.moveTo(-0.024, -0.075);
+    g.quadraticCurveTo(0, -0.081, 0.024, -0.075);
+    g.quadraticCurveTo(0.01, -0.052, 0, -0.051);
+    g.quadraticCurveTo(-0.01, -0.052, -0.024, -0.075);
     g.closePath();
     g.fill();
     g.stroke();
     // mouth
     g.strokeStyle = INK;
-    g.lineWidth = L * 0.85;
+    g.lineWidth = L * 0.8;
     if (state === FACE_HAPPY) {
       g.fillStyle = '#7A2342';
       g.beginPath();
-      g.moveTo(-0.055, 0.066);
-      g.quadraticCurveTo(0, 0.078, 0.055, 0.066);
-      g.quadraticCurveTo(0.05, 0.135, 0, 0.138);
-      g.quadraticCurveTo(-0.05, 0.135, -0.055, 0.066);
+      g.moveTo(-0.045, -0.04);
+      g.quadraticCurveTo(0, -0.03, 0.045, -0.04);
+      g.quadraticCurveTo(0.04, 0.018, 0, 0.02);
+      g.quadraticCurveTo(-0.04, 0.018, -0.045, -0.04);
       g.closePath();
       g.fill();
       g.save();
       g.clip();
       g.fillStyle = '#FF8DAA';
       g.beginPath();
-      ell(g, 0, 0.13, 0.034, 0.025);
+      ell(g, 0, 0.016, 0.028, 0.02);
       g.fill();
       g.restore();
       g.stroke();
     } else if (state === FACE_SURPRISED) {
       g.fillStyle = '#7A2342';
       g.beginPath();
-      ell(g, 0, 0.096, 0.026, 0.032);
+      ell(g, 0, -0.012, 0.022, 0.028);
       g.fill();
       g.stroke();
     } else {
       g.beginPath();
-      g.moveTo(0, 0.054);
-      g.lineTo(0, 0.068);
-      g.moveTo(-0.055, 0.062);
-      g.quadraticCurveTo(-0.027, 0.096, 0, 0.068);
-      g.quadraticCurveTo(0.027, 0.096, 0.055, 0.062);
+      g.moveTo(0, -0.052);
+      g.lineTo(0, -0.04);
+      g.moveTo(-0.045, -0.044);
+      g.quadraticCurveTo(-0.022, -0.016, 0, -0.04);
+      g.quadraticCurveTo(0.022, -0.016, 0.045, -0.044);
       g.stroke();
     }
+  }
+
+  function paintCollar(g) {
+    const band = new Path2D();
+    band.moveTo(-0.24, -0.008);
+    band.quadraticCurveTo(0, 0.085, 0.24, -0.008);
+    g.lineCap = 'round';
+    g.strokeStyle = COLLAR.outline;
+    g.lineWidth = 0.05 + 1.6 * lw;
+    g.stroke(band);
+    g.strokeStyle = COLLAR.main;
+    g.lineWidth = 0.05;
+    g.stroke(band);
+    g.strokeStyle = rgba(COLLAR.light, 0.9);
+    g.lineWidth = 0.014;
+    g.beginPath();
+    g.moveTo(-0.18, 0.006);
+    g.quadraticCurveTo(-0.1, 0.035, -0.03, 0.04);
+    g.stroke();
   }
 
   function paintKey(g) {
@@ -1070,60 +1134,34 @@ export function createArt() {
 
   function paintShadow(g) {
     g.save();
-    g.scale(1, 0.3);
-    const rg = g.createRadialGradient(0, 0, 0, 0, 0, 0.31);
-    rg.addColorStop(0, `rgba(${SHADOW_RGB},0.32)`);
-    rg.addColorStop(0.6, `rgba(${SHADOW_RGB},0.22)`);
+    g.scale(1, 0.2);
+    const rg = g.createRadialGradient(0, 0, 0, 0, 0, 0.4);
+    rg.addColorStop(0, `rgba(${SHADOW_RGB},0.3)`);
+    rg.addColorStop(0.65, `rgba(${SHADOW_RGB},0.2)`);
     rg.addColorStop(1, `rgba(${SHADOW_RGB},0)`);
     g.fillStyle = rg;
     g.beginPath();
-    g.arc(0, 0, 0.31, 0, TAU);
+    g.arc(0, 0, 0.4, 0, TAU);
     g.fill();
     g.restore();
   }
 
-  // sprite getters (catSp: 0 base, 1 ear, 2 tail, 3 face, 4 shadow/key/etc)
-  function baseSp(c, v) {
-    const i = c * NV + v;
-    return catSp[0][i] || (catSp[0][i] = sprite(-0.47, -0.42, 0.47, 0.5, (g) => paintBase(g, PALETTE[c], v)));
+  // sprite getters (catSp: 0 body per colour, 1 faces, 2 shadow / key / collar, 3 trails)
+  function bodySp(c) {
+    return catSp[0][c] || (catSp[0][c] = sprite(-0.46, -0.53, 0.46, 0.5, (g) => paintBody(g, c)));
   }
-  function earSp(c) {
-    return catSp[1][c] || (catSp[1][c] = sprite(-0.17, -0.24, 0.17, 0.12, (g) => paintEar(g, PALETTE[c])));
-  }
-  function tailSp(c, tip) {
-    const i = c * 2 + tip;
-    return catSp[2][i] || (catSp[2][i] = sprite(-0.09, -0.34, 0.32, 0.1, (g) => paintTail(g, PALETTE[c], tip)));
-  }
-  function faceSp(big, state) {
-    const i = big * 4 + state;
-    return catSp[3][i] || (catSp[3][i] = sprite(-0.3, -0.16, 0.3, 0.17, (g) => paintFace(g, big, state)));
+  function faceSp(style, big, state) {
+    const i = (style * 2 + big) * 4 + state;
+    return catSp[1][i] || (catSp[1][i] = sprite(-0.31, -0.22, 0.31, 0.05, (g) => paintFace(g, style, big, state)));
   }
   function shadowSp() {
-    return catSp[4][0] || (catSp[4][0] = sprite(-0.33, -0.11, 0.33, 0.11, paintShadow));
-  }
-  function paintCollar(g) {
-    const band = new Path2D();
-    band.moveTo(-0.165, 0.17);
-    band.quadraticCurveTo(0, 0.268, 0.165, 0.17);
-    g.lineCap = 'round';
-    g.strokeStyle = COLLAR.outline;
-    g.lineWidth = 0.05 + 1.6 * lw;
-    g.stroke(band);
-    g.strokeStyle = COLLAR.main;
-    g.lineWidth = 0.05;
-    g.stroke(band);
-    g.strokeStyle = rgba(COLLAR.light, 0.9);
-    g.lineWidth = 0.014;
-    g.beginPath();
-    g.moveTo(-0.12, 0.176);
-    g.quadraticCurveTo(-0.05, 0.208, -0.02, 0.212);
-    g.stroke();
-  }
-  function collarSp() {
-    return catSp[4][2] || (catSp[4][2] = sprite(-0.21, 0.11, 0.21, 0.27, paintCollar));
+    return catSp[2][0] || (catSp[2][0] = sprite(-0.42, -0.1, 0.42, 0.1, paintShadow));
   }
   function keySp() {
-    return catSp[4][1] || (catSp[4][1] = sprite(-0.085, -0.03, 0.095, 0.26, paintKey));
+    return catSp[2][1] || (catSp[2][1] = sprite(-0.085, -0.03, 0.095, 0.26, paintKey));
+  }
+  function collarSp() {
+    return catSp[2][2] || (catSp[2][2] = sprite(-0.29, -0.06, 0.29, 0.1, paintCollar));
   }
 
   function isBlink(t, p) {
@@ -1134,7 +1172,7 @@ export function createArt() {
 
   function drawCat(ctx, cx, cy, colour, o) {
     if (!o) o = EMPTY;
-    const c = colour & 7;
+    const c = col(colour);
     const alpha = o.alpha === undefined ? 1 : o.alpha;
     const k = (o.size > 0 ? o.size / cell : 1) * (o.scale === undefined ? 1 : o.scale);
     if (!(alpha > 0.003) || !(k > 0.003)) return;
@@ -1146,26 +1184,40 @@ export function createArt() {
     if (hop && mood === 0) mood = 1;
     const P = PALETTE[c];
 
+    // breathing + an occasional mochi wobble
     const br = Math.sin(t * p.bw + p.bp);
-    let sx = 1 - 0.012 * br;
-    let sy = 1 + 0.02 * br;
+    let sx = 1 - 0.01 * br;
+    let sy = 1 + 0.016 * br;
     let lift = 0;
+    let u = (t + p.wigO) % p.wig;
+    if (u < 0) u += p.wig;
+    if (u < 0.6 && !hop) {
+      const w = Math.sin(u * 24) * 0.05 * (1 - u / 0.6);
+      sx *= 1 + w;
+      sy *= 1 - w;
+    }
     if (hop) {
       if (hop < 0.16) {
         const s = Math.sin((hop / 0.16) * Math.PI);
-        sx *= 1 + 0.15 * s;
-        sy *= 1 - 0.17 * s;
+        sx *= 1 + 0.14 * s;
+        sy *= 1 - 0.16 * s;
       } else if (hop < 0.84) {
-        const u = (hop - 0.16) / 0.68;
-        lift = 4 * u * (1 - u);
-        const st = Math.abs(Math.cos(u * Math.PI));
-        sy *= 1 + 0.12 * st;
-        sx *= 1 - 0.08 * st;
+        const v = (hop - 0.16) / 0.68;
+        lift = 4 * v * (1 - v);
+        const st = Math.abs(Math.cos(v * Math.PI));
+        sy *= 1 + 0.1 * st;
+        sx *= 1 - 0.07 * st;
       } else {
         const s = Math.sin(((hop - 0.84) / 0.16) * Math.PI);
-        sx *= 1 + 0.13 * s;
-        sy *= 1 - 0.14 * s;
+        sx *= 1 + 0.12 * s;
+        sy *= 1 - 0.13 * s;
       }
+    } else if (mood === 1) {
+      // excited little bounces (e.g. while a hole of its colour is dragged)
+      const b = Math.abs(Math.sin(t * 7.5 + p.hp));
+      lift = 0.12 * b;
+      sy *= 1 + 0.03 * b;
+      sx *= 1 - 0.02 * b;
     }
     const ga = ctx.globalAlpha;
     const C = cell * k;
@@ -1177,7 +1229,6 @@ export function createArt() {
       ctx.drawImage(sh.c, cx - sh.ox * kk, cy + SHADOW_Y * C - sh.oy * kk, sh.w * kk, sh.h * kk);
     }
     const a1 = ga * alpha;
-    const at = a1 * tint;
     ctx.globalAlpha = a1;
     ctx.save();
     ctx.translate(cx, cy - lift * HOP_H * C);
@@ -1186,69 +1237,21 @@ export function createArt() {
     ctx.translate(0, fy * k);
     ctx.scale(k * sx, k * sy);
     ctx.translate(0, -fy);
-
-    // tail
-    const tail = tailSp(c, p.tip);
-    const ta = mood === 1 ? Math.sin(t * p.tw * 2.6 + p.tp) * (p.ta + 0.12) : Math.sin(t * p.tw + p.tp) * p.ta;
-    ctx.save();
-    ctx.translate(p.side * TAIL_X * cell, TAIL_Y * cell);
-    ctx.scale(p.side, 1);
-    ctx.rotate(ta);
-    blit(ctx, tail, 0, 0);
-    if (at > 0) {
-      ctx.globalAlpha = at;
-      blit(ctx, silOf(tail, P.deep), 0, 0);
-      ctx.globalAlpha = a1;
-    }
-    ctx.restore();
-
-    // ears
-    const ear = earSp(c);
-    let tw = 0;
-    let u = (t + p.twO) % p.twP;
-    if (u < 0) u += p.twP;
-    if (u < 0.34) tw = 0.32 * Math.abs(Math.sin((u / 0.17) * Math.PI));
-    const er = EAR_ROT + (mood === 2 ? -0.14 : mood === 1 ? 0.05 : 0);
-    const earSil = at > 0 ? silOf(ear, P.deep) : null;
-    ctx.save();
-    ctx.translate(-EAR_X * cell, EAR_Y * cell);
-    ctx.rotate(-(er + p.el + (p.twS ? 0 : tw)));
-    blit(ctx, ear, 0, 0);
-    if (earSil) {
-      ctx.globalAlpha = at;
-      blit(ctx, earSil, 0, 0);
-      ctx.globalAlpha = a1;
-    }
-    ctx.restore();
-    ctx.save();
-    ctx.translate(EAR_X * cell, EAR_Y * cell);
-    ctx.rotate(er + p.er + (p.twS ? tw : 0));
-    ctx.scale(-1, 1);
-    blit(ctx, ear, 0, 0);
-    if (earSil) {
-      ctx.globalAlpha = at;
-      blit(ctx, earSil, 0, 0);
-      ctx.globalAlpha = a1;
-    }
-    ctx.restore();
-
-    // body + head, face
-    const base = baseSp(c, p.v);
-    blit(ctx, base, 0, 0);
+    const body = bodySp(c);
+    blit(ctx, body, 0, 0);
     const state = mood === 1 ? FACE_HAPPY : mood === 2 ? FACE_SURPRISED : o.blink || isBlink(t, p) ? FACE_CLOSED : FACE_OPEN;
-    blit(ctx, faceSp(p.big, state), 0, 0);
-    if (at > 0) {
-      ctx.globalAlpha = at;
-      blit(ctx, silOf(base, P.deep), 0, 0);
+    blit(ctx, faceSp(LOOKS[c].eyes, p.big, state), 0, 0);
+    if (tint > 0) {
+      ctx.globalAlpha = a1 * tint;
+      blit(ctx, silOf(body, P.deep), 0, 0);
       ctx.globalAlpha = a1;
     }
     if (o.key) {
-      const ks = keySp();
       ctx.globalAlpha = a1 * (1 - tint);
       blit(ctx, collarSp(), 0, 0);
       ctx.translate(0, KEY_Y * cell);
       ctx.rotate(0.13 * Math.sin(t * 2.3 + p.kp) + (hop ? 0.25 * Math.sin(hop * TAU) : 0));
-      blit(ctx, ks, 0, 0);
+      blit(ctx, keySp(), 0, 0);
     }
     ctx.restore();
     ctx.globalAlpha = ga;
@@ -1327,12 +1330,20 @@ export function createArt() {
     let bh = 0;
     let sx = 0;
     let sy = 0;
+    // tag cell: the last cell (max dx + dy, ties → max dx)
+    let tcx = list[0][0];
+    let tcy = list[0][1];
     for (const [x, y] of list) {
       bw = Math.max(bw, x + 1);
       bh = Math.max(bh, y + 1);
       sx += x + 0.5;
       sy += y + 0.5;
+      if (x + y > tcx + tcy || (x + y === tcx + tcy && x > tcx)) {
+        tcx = x;
+        tcy = y;
+      }
     }
+    // visual centre: centre of mass, snapped to the nearest cell centre when a disc around it leaves the shape
     let bx = sx / list.length;
     let by = sy / list.length;
     let fits = inSet(Math.floor(bx), Math.floor(by));
@@ -1355,12 +1366,18 @@ export function createArt() {
       bx = nx;
       by = ny;
     }
+    const tx = tcx + 1 - H_IN + 0.012; // tag right edge
+    const ty = tcy + 1 - H_IN + 0.012; // tag bottom edge
     let rmax = 0;
     let irisR = 0;
+    let rTag = 0;
     const ii = H_IN + H_RIM;
     const cut = H_RI * (Math.SQRT2 - 1);
     for (const [x, y] of list) {
-      for (const [qx, qy] of [[x, y], [x + 1, y], [x, y + 1], [x + 1, y + 1]]) rmax = Math.max(rmax, Math.hypot(qx - bx, qy - by));
+      for (const [qx, qy] of [[x, y], [x + 1, y], [x, y + 1], [x + 1, y + 1]]) {
+        rmax = Math.max(rmax, Math.hypot(qx - bx, qy - by));
+        rTag = Math.max(rTag, Math.hypot(qx - (tx - 0.16), qy - (ty - 0.18)));
+      }
       // farthest visible pit point (rounded corners trimmed)
       for (const [qx, qy] of [[x + ii, y + ii], [x + 1 - ii, y + ii], [x + ii, y + 1 - ii], [x + 1 - ii, y + 1 - ii]]) {
         irisR = Math.max(irisR, Math.hypot(qx - bx, qy - by) - cut);
@@ -1370,10 +1387,13 @@ export function createArt() {
     const outer = new Path2D();
     const inner = new Path2D();
     const gloss = new Path2D();
+    const rings = [];
+    for (let k = 0; k < MAX_RINGS; k++) rings.push(new Path2D());
     for (const lp of loops) {
       loopPath(outer, lp, H_IN, H_R, H_r);
       loopPath(inner, lp, H_IN + H_RIM, H_RI, H_rI);
-      loopPath(gloss, lp, H_IN + 0.04, H_R - 0.04, H_r + 0.04);
+      loopPath(gloss, lp, H_IN + 0.03, H_R - 0.03, H_r + 0.03);
+      for (let k = 0; k < MAX_RINGS; k++) loopPath(rings[k], lp, H_IN - RING * (k + 1), H_R + RING * (k + 1), Math.max(0.02, H_r - RING * (k + 1)));
     }
     // Falling-cat clip: pit + a column above every top cell.
     const ins = H_IN + H_RIM;
@@ -1388,7 +1408,7 @@ export function createArt() {
       }
       return p;
     };
-    // Chevron anchors for axis-locked holes: ends of the run through the badge.
+    // Chevron anchors for axis-locked holes: ends of the run through the visual centre.
     const ry = Math.min(bh - 1, Math.floor(by));
     const rx = Math.min(bw - 1, Math.floor(bx));
     let x0 = rx;
@@ -1400,9 +1420,8 @@ export function createArt() {
     while (inSet(rx, y0 - 1)) y0--;
     while (inSet(rx, y1 + 1)) y1++;
     G = {
-      key, cells: list, bw, bh, bx, by, rmax, outer, inner, gloss, clipFor, clips: new Map(),
+      key, cells: list, bw, bh, bx, by, tx, ty, rmax, rTag, outer, inner, gloss, rings, clipFor, clips: new Map(),
       outerInv: inverse(outer, -2, -2, bw + 2, bh + 2),
-      innerInv: inverse(inner, -2, -2, bw + 2, bh + 2),
       chevH: [x0 + ins + 0.085, x1 + 1 - ins - 0.085, by, x1 - x0 + 1],
       chevV: [y0 + ins + 0.085, y1 + 1 - ins - 0.085, bx, y1 - y0 + 1],
       rIris: irisR,
@@ -1439,81 +1458,76 @@ export function createArt() {
     g.stroke();
   }
 
-  function paintHole(g, G, P, axis) {
+  function paintHole(g, G, c, axis, next) {
     const L = lw;
+    const P = PALETTE[c];
     // contact shadow on the floor
     g.save();
-    g.shadowColor = `rgba(${SHADOW_RGB},0.38)`;
-    g.shadowBlur = 0.09 * S;
-    g.shadowOffsetY = 0.05 * S;
+    g.shadowColor = `rgba(${SHADOW_RGB},0.28)`;
+    g.shadowBlur = 0.07 * S;
+    g.shadowOffsetY = 0.035 * S;
     g.fillStyle = P.dark;
-    g.fill(G.outer);
+    g.fill(next.length ? G.rings[Math.min(MAX_RINGS, next.length) - 1] : G.outer);
     g.restore();
-    // rim body + bevel
-    const rg = g.createLinearGradient(0, 0, 0, G.bh);
-    rg.addColorStop(0, mix(P.main, P.light, 0.15));
-    rg.addColorStop(1, mix(P.main, P.dark, 0.2));
-    g.fillStyle = rg;
+    // rings of the layers still to come, outermost first (the innermost is the next colour)
+    for (let k = Math.min(MAX_RINGS, next.length); k >= 1; k--) {
+      const Q = PALETTE[col(next[k - 1])];
+      const rp = G.rings[k - 1];
+      g.lineWidth = 2 * L;
+      g.strokeStyle = Q.outline;
+      g.stroke(rp);
+      g.fillStyle = Q.main;
+      g.fill(rp);
+      g.save();
+      g.clip(rp);
+      g.lineWidth = 0.022;
+      g.strokeStyle = rgba(Q.light, 0.7);
+      g.translate(0, 0.012);
+      g.stroke(rp);
+      g.restore();
+    }
+    // rim: flat colour, a lit top edge, a shaded bottom edge, dark outline
+    g.lineWidth = 2 * L;
+    g.strokeStyle = P.outline;
+    g.stroke(G.outer);
+    g.fillStyle = P.main;
     g.fill(G.outer);
     g.save();
     g.clip(G.outer);
-    band(g, G.outerInv, 0.03, 0.05, mix(P.light, P.main, 0.15));
-    band(g, G.outerInv, -0.025, -0.045, P.dark);
-    g.save();
-    g.translate(-0.022, -0.04);
-    g.fillStyle = mix(P.main, P.dark, 0.65);
-    g.fill(G.inner);
+    band(g, G.outerInv, 0, 0.04, rgba(P.light, 0.55));
+    band(g, G.outerInv, 0, -0.035, rgba(P.dark, 0.55));
     g.restore();
-    g.save();
-    g.translate(0.018, 0.032);
-    g.fillStyle = mix(P.main, P.light, 0.55);
-    g.fill(G.inner);
-    g.restore();
-    // gloss streak along the top
-    g.save();
-    g.translate(0, 0.085);
-    g.clip(G.outerInv, 'evenodd');
-    g.translate(0, -0.085);
-    g.strokeStyle = 'rgba(255,255,255,0.75)';
-    g.lineWidth = 0.032;
-    g.stroke(G.gloss);
-    g.restore();
-    g.restore();
-    // outlines
-    g.lineWidth = L;
+    // pit: lighter far wall at the top, deep at the bottom
+    g.lineWidth = 2 * L * 0.8;
     g.strokeStyle = P.outline;
-    g.stroke(G.outer);
-    // pit
-    const pg = g.createLinearGradient(0, 0, 0, G.bh);
-    pg.addColorStop(0, mix(P.deep, '#000000', 0.18));
-    pg.addColorStop(0.55, P.deep);
-    pg.addColorStop(1, mix(P.deep, P.main, 0.2));
+    g.stroke(G.inner);
+    const pg = g.createLinearGradient(0, H_IN + H_RIM, 0, G.bh - H_IN - H_RIM);
+    pg.addColorStop(0, c === 8 ? mix(P.dark, P.deep, 0.3) : mix(P.dark, P.deep, 0.4));
+    pg.addColorStop(0.55, mix(P.dark, P.deep, 0.72));
+    pg.addColorStop(1, mix(P.deep, '#000000', 0.12));
     g.fillStyle = pg;
     g.fill(G.inner);
     g.save();
     g.clip(G.inner);
-    g.shadowColor = 'rgba(0,0,0,0.75)';
-    g.shadowBlur = 0.11 * S;
-    g.shadowOffsetY = 0.075 * S;
+    // soft shade along the near (lower) and side walls
+    g.shadowColor = rgba(mix(P.deep, '#000000', 0.5), 0.55);
+    g.shadowBlur = 0.12 * S;
+    g.shadowOffsetY = -0.05 * S;
     g.fillStyle = '#000';
-    g.fill(G.innerInv, 'evenodd');
+    g.fill(inverse(G.inner, -2, -2, G.bw + 2, G.bh + 2), 'evenodd');
     g.restore();
-    g.lineWidth = L * 0.9;
-    g.strokeStyle = P.outline;
-    g.stroke(G.inner);
     if (marks) {
-      // faint emblem in every pit cell (behind the badge): the shape reads around the number
+      // faint emblem in every pit cell: the shape reads around the number
       const sp = new Path2D();
-      const size = G.cells.length === 1 ? 0.64 : 0.5;
-      for (const [x, y] of G.cells) symbolPath(sp, PALETTE.indexOf(P), x + 0.5, y + 0.5, size);
+      const size = G.cells.length === 1 ? 0.6 : 0.5;
+      for (const [x, y] of G.cells) symbolPath(sp, c, x + 0.5, y + 0.5, size);
       g.save();
       g.clip(G.inner);
-      g.fillStyle = rgba(P.main, 0.42);
+      g.fillStyle = rgba(P.main, 0.45);
       g.fill(sp, 'evenodd');
       g.restore();
     }
-    // axis chevrons: inside the pit at both ends of the run through the badge, or on the rim when
-    // the run is a single cell (no room next to the number)
+    // axis chevrons: inside the pit at both ends of the run, or on the rim when the run is a single cell
     if (axis === 'h' || axis === 'v') {
       const v = axis === 'v';
       const [a, b, o, n] = v ? G.chevV : G.chevH;
@@ -1525,11 +1539,11 @@ export function createArt() {
       } else {
         const ra = a - 0.085 - H_RIM / 2 - 0.008;
         const rb = b + 0.085 + H_RIM / 2 + 0.008;
-        for (const [w, style] of [[0.075, rgba(P.outline, 0.85)], [0.036, '#FFFFFF']]) {
+        for (const [w, style] of [[0.07, rgba(P.outline, 0.85)], [0.034, '#FFFFFF']]) {
           g.strokeStyle = style;
           g.lineWidth = w;
-          chevron(g, v ? o : ra, v ? ra : o, -1, v, 0.085);
-          chevron(g, v ? o : rb, v ? rb : o, 1, v, 0.085);
+          chevron(g, v ? o : ra, v ? ra : o, -1, v, 0.08);
+          chevron(g, v ? o : rb, v ? rb : o, 1, v, 0.08);
         }
       }
     }
@@ -1537,7 +1551,7 @@ export function createArt() {
 
   function paintGlow(g, G, P) {
     g.save();
-    g.shadowColor = rgba(P.main, 0.95);
+    g.shadowColor = rgba(P.main === '#FBFAFF' ? P.outline : P.main, 0.95);
     g.shadowBlur = 0.24 * S;
     g.fillStyle = P.main;
     g.fill(G.outer);
@@ -1583,7 +1597,7 @@ export function createArt() {
     g.fillStyle = rg;
     g.fillRect(-1, -1, G.bw + 2, G.bh + 2);
     // paw stamp
-    g.fillStyle = rgba('#FFFFFF', 0.92);
+    g.fillStyle = P.main === '#FBFAFF' ? rgba(P.dark, 0.95) : rgba('#FFFFFF', 0.92);
     g.beginPath();
     const x = G.bx;
     const y = G.by + 0.04;
@@ -1599,14 +1613,17 @@ export function createArt() {
     g.stroke(G.inner);
   }
 
-  function holeEntry(cells, c, axis) {
+  function holeEntry(cells, c, axis, next) {
     const G = geom(cells);
-    const key = G.key + '|' + c + '|' + (axis || '');
+    let nk = '';
+    for (let i = 0; i < next.length && i < MAX_RINGS; i++) nk += ',' + col(next[i]);
+    const key = G.key + '|' + c + '|' + (axis || '') + nk;
     let e = holeC.get(key);
     if (e) return e;
     trim();
-    e = { G, c, axis, base: null, glow: null, white: null, flash: null, lid: null };
-    e.base = holeSprite(G, (g) => paintHole(g, G, PALETTE[c], axis));
+    const nx = next.slice(0, MAX_RINGS).map(col);
+    e = { G, c, axis, next: nx, base: null, glow: null, white: null, flash: null, lid: null };
+    e.base = holeSprite(G, (g) => paintHole(g, G, c, axis, nx));
     holeC.set(key, e);
     return e;
   }
@@ -1617,16 +1634,26 @@ export function createArt() {
     else ctx.drawImage(sp.c, x - sp.ox * s, y - sp.oy * s, sp.w * s, sp.h * s);
   }
 
+  /** Tag centre (cells, relative to the shape origin) for a number. */
+  function tagPos(G, n) {
+    return [G.tx - tagW(n) / 2, G.ty - TAG_H / 2];
+  }
+
+  const NO_NEXT = [];
+
   function drawHole(ctx, cells, x, y, colour, o) {
     if (!o) o = EMPTY;
     const closing = o.closing > 0 ? o.closing : 0;
     if (closing >= 1 || !cells || !cells.length) return;
-    const c = colour & 7;
+    const c = col(colour);
     const P = PALETTE[c];
-    const e = holeEntry(cells, c, o.axis === 'h' || o.axis === 'v' ? o.axis : null);
+    const axis = o.axis === 'h' || o.axis === 'v' ? o.axis : null;
+    const next = Array.isArray(o.next) && o.next.length ? o.next : NO_NEXT;
+    const e = holeEntry(cells, c, axis, next);
     const G = e.G;
     const lifted = o.lifted > 0 ? (o.lifted < 1 ? o.lifted : 1) : 0;
     const pulse = o.pulse > 0 ? (o.pulse < 1 ? o.pulse : 1) : 0;
+    const change = o.change > 0 && o.change < 1 && o.prev !== undefined && o.prev !== null ? o.change : 0;
     const bx = x + G.bx * cell;
     const by = y + G.by * cell;
     let s = 1 + 0.035 * lifted;
@@ -1636,6 +1663,12 @@ export function createArt() {
       const w = Math.cos((1 - pulse) * Math.PI * 2.4) * pulse;
       sxk = 1 + 0.085 * w;
       syk = 1 + 0.06 * w;
+    }
+    let prevE = null;
+    if (change) {
+      const pc = col(o.prev);
+      if (pc !== c) prevE = holeEntry(cells, pc, axis, [c, ...next]);
+      s *= 1 + 0.08 * Math.sin(Math.PI * change);
     }
     let a = 1;
     if (closing > 0.62) {
@@ -1658,6 +1691,7 @@ export function createArt() {
     }
     ctx.globalAlpha = ga * a;
     blit(ctx, e.base, x, y);
+    if (prevE) drawSweep(ctx, G, prevE, x, y, change, o.need);
     const wa = 0.26 * lifted + 0.45 * pulse * pulse;
     if (wa > 0.01) {
       ctx.globalAlpha = ga * a * wa;
@@ -1667,6 +1701,7 @@ export function createArt() {
       ctx.globalAlpha = ga * a * pulse;
       blit(ctx, (e.flash ||= holeSprite(G, (g) => paintFlash(g, G, P))), x, y);
     }
+    const [tcx, tcy] = o.need > 0 ? tagPos(G, o.need) : [0, 0];
     if (closing > 0) {
       ctx.globalAlpha = ga * a;
       drawIris(ctx, e, x, y, closing);
@@ -1680,15 +1715,45 @@ export function createArt() {
       const ba = 1 - closing / 0.12;
       if (o.need > 0 && ba > 0 && o.badge !== false) {
         ctx.globalAlpha = ga * ba;
-        drawBadgeAt(ctx, bx, by, o.need, c, 1);
+        drawBadgeAt(ctx, x + tcx * cell, y + tcy * cell, o.need, c, 1);
       }
     } else if (o.need > 0 && o.badge !== false) {
       ctx.globalAlpha = ga * a;
-      const bs = 1 + 0.32 * pulse * pulse;
-      drawBadgeAt(ctx, bx, by, o.need, c, bs);
+      const bs = (1 + 0.3 * pulse * pulse) * (1 + 0.3 * Math.sin(Math.PI * change));
+      drawBadgeAt(ctx, x + tcx * cell, y + tcy * cell, o.need, c, bs);
     }
     ctx.restore();
     ctx.globalAlpha = ga;
+  }
+
+  /** Layer change: the old colour (prevE) is swept away by a circle growing from the tag, with a bright edge. */
+  function drawSweep(ctx, G, prevE, x, y, change, need) {
+    const [tx, ty] = tagPos(G, need > 0 ? need : 1);
+    const k = 1 - (1 - change) * (1 - change);
+    const r = (G.rTag + 0.35) * k;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(cell, cell);
+    ctx.beginPath();
+    ctx.rect(-H_PAD - 1, -H_PAD - 1, G.bw + 2 * H_PAD + 2, G.bh + 2 * H_PAD + 2);
+    ctx.moveTo(tx + r, ty);
+    ctx.arc(tx, ty, r, 0, TAU, true);
+    ctx.clip('evenodd');
+    const sp = prevE.base;
+    ctx.drawImage(sp.c, -sp.ox / cell, -sp.oy / cell, sp.w / cell, sp.h / cell);
+    ctx.restore();
+    // bright front of the sweep, clipped to the hole
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(cell, cell);
+    ctx.clip(G.outer);
+    ctx.globalAlpha *= 1 - change;
+    ctx.strokeStyle = '#FFFFFF';
+    ctx.lineWidth = 0.09;
+    ctx.beginPath();
+    ctx.arc(tx, ty, Math.max(0.01, r), 0, TAU);
+    ctx.stroke();
+    ctx.restore();
   }
 
   function drawIris(ctx, e, x, y, closing) {
@@ -1738,8 +1803,17 @@ export function createArt() {
     if (!o) o = EMPTY;
     const G = geom(cells);
     const pulse = o.pulse > 0 ? Math.min(1, o.pulse) : 0;
-    const s = (o.scale > 0 ? o.scale : 1) * (1 + 0.32 * pulse * pulse);
-    drawBadgeAt(ctx, x + G.bx * cell, y + G.by * cell, need, colour & 7, s);
+    const change = o.change > 0 && o.change < 1 ? o.change : 0;
+    const s = (o.scale > 0 ? o.scale : 1) * (1 + 0.3 * pulse * pulse) * (1 + 0.32 * Math.sin(Math.PI * change));
+    const [tx, ty] = tagPos(G, need);
+    const ga = ctx.globalAlpha;
+    if (o.alpha !== undefined) ctx.globalAlpha = ga * o.alpha;
+    drawBadgeAt(ctx, x + tx * cell, y + ty * cell, need, col(colour), s);
+    ctx.globalAlpha = ga;
+  }
+
+  function badgeAt(cells, need = 1) {
+    return tagPos(geom(cells), need);
   }
 
   function holeCenter(cells) {
@@ -1787,6 +1861,30 @@ export function createArt() {
       t: o.t || 0, seed: o.seed || 0, mood: 'surprised', scale, tint, rot, key: o.key, alpha: 1 - smooth(0.82, 1, q), shadow: false,
     });
     ctx.restore();
+  }
+
+  // ═════════════════════════════════════════ trails ═════════════════════════════════════════
+  function trailSp(c) {
+    return catSp[3][c] || (catSp[3][c] = sprite(0, 0, 1, 1, (g) => {
+      const P = PALETTE[c];
+      const p = new Path2D();
+      rrect(p, 0.05, 0.05, 0.9, 0.9, 0.15);
+      g.fillStyle = rgba(c === 8 ? '#FFFFFF' : P.main, c === 8 ? 0.8 : 0.5);
+      g.fill(p);
+      g.lineWidth = 0.03;
+      g.strokeStyle = rgba(c === 8 ? P.dark : P.main, 0.55);
+      g.stroke(p);
+    }));
+  }
+
+  function drawTrail(ctx, x, y, colour, alpha) {
+    const a = alpha === undefined ? 1 : alpha;
+    if (!(a > 0.003)) return;
+    const sp = trailSp(col(colour));
+    const ga = ctx.globalAlpha;
+    ctx.globalAlpha = ga * Math.min(1, a);
+    ctx.drawImage(sp.c, x - sp.ox, y - sp.oy, sp.w, sp.h);
+    ctx.globalAlpha = ga;
   }
 
   // ═════════════════════════════════════════ crate ═════════════════════════════════════════
@@ -2390,96 +2488,84 @@ export function createArt() {
     const at = (x, y) => (x < 0 || y < 0 || x >= w || y >= h ? 0 : ground[y * w + x]);
     const isB = (x, y) => at(x, y) !== 0;
     const L = lw;
-    // The frame also fills void gaps only one cell wide (board on both sides): the frame bands from both
-    // sides would almost meet there and leave an odd sliver of background.
-    const solid = new Uint8Array(w * h);
-    for (let i = 0; i < w * h; i++) solid[i] = ground[i] !== 0 ? 1 : 0;
-    const isS = (x, y) => x >= 0 && y >= 0 && x < w && y < h && solid[y * w + x] === 1;
-    for (let pass = 0, changed = true; changed && pass < 8; pass++) {
-      changed = false;
-      for (let y = 0; y < h; y++) {
-        for (let x = 0; x < w; x++) {
-          if (solid[y * w + x]) continue;
-          if ((isS(x - 1, y) && isS(x + 1, y)) || (isS(x, y - 1) && isS(x, y + 1))) {
-            solid[y * w + x] = 2;
-            changed = true;
-          }
-        }
-      }
-      for (let i = 0; i < w * h; i++) if (solid[i] === 2) solid[i] = 1;
-    }
-    const frame = regionPath(isS, w, h, FRAME_W, FLOOR_R + FRAME_W, 0.16);
-    const floor = regionPath(isB, w, h, 0, FLOOR_R, 0.1);
-
-    // drop shadow on the page
+    // the frame: one rounded purple slab around the whole board, with a deeper bottom face
+    const slab = new Path2D();
+    rrect(slab, -FRAME_W, -FRAME_W, w + 2 * FRAME_W, h + 2 * FRAME_W, FRAME_R);
+    const slabInv = inverse(slab, -2, -2, w + 2, h + 2);
     g.save();
-    g.shadowColor = 'rgba(60, 30, 120, 0.34)';
-    g.shadowBlur = 0.32 * S;
-    g.shadowOffsetY = 0.16 * S;
+    g.shadowColor = 'rgba(45, 18, 100, 0.4)';
+    g.shadowBlur = 0.3 * S;
+    g.shadowOffsetY = 0.14 * S;
     g.translate(0, FRAME_D);
     g.fillStyle = FRAME.side2;
-    g.fill(frame);
+    g.fill(slab);
     g.restore();
-    // side face
     g.save();
     g.translate(0, FRAME_D);
     g.lineWidth = 2 * L;
     g.strokeStyle = FRAME.outline;
-    g.stroke(frame);
-    const sg = g.createLinearGradient(0, h - 1, 0, h + FRAME_W + FRAME_D);
-    sg.addColorStop(0, FRAME.side);
+    g.stroke(slab);
+    const sg = g.createLinearGradient(0, h, 0, h + FRAME_W + FRAME_D);
+    sg.addColorStop(0, FRAME.side1);
     sg.addColorStop(1, FRAME.side2);
     g.fillStyle = sg;
-    g.fill(frame);
+    g.fill(slab);
     g.restore();
-    // top face: shaded lower lip, glossy upper lip, gradient in between. The frame is a union of
-    // overlapping sub-paths, so the bands come from clipping with shifted copies (no even-odd inverse).
     g.lineWidth = 2 * L;
     g.strokeStyle = FRAME.outline;
-    g.stroke(frame);
-    g.save();
-    g.clip(frame);
-    g.fillStyle = mix(FRAME.top2, FRAME.side, 0.45);
-    g.fillRect(-2, -2, w + 4, h + 4);
-    g.translate(0, -0.06);
-    g.clip(frame);
-    g.fillStyle = '#FFF3DA';
-    g.fillRect(-2, -2, w + 4, h + 4);
-    g.translate(0, 0.13);
+    g.stroke(slab);
     const tg = g.createLinearGradient(0, -FRAME_W, 0, h + FRAME_W);
     tg.addColorStop(0, FRAME.top1);
     tg.addColorStop(1, FRAME.top2);
     g.fillStyle = tg;
-    g.fill(frame);
+    g.fill(slab);
+    g.save();
+    g.clip(slab);
+    band(g, slabInv, 0.045, 0.065, rgba(FRAME.hi, 0.85));
+    band(g, slabInv, -0.035, -0.05, rgba(FRAME.side1, 0.55));
     g.restore();
-    // floor: lip outline, base, checker
-    g.lineWidth = 2 * L;
-    g.strokeStyle = FRAME.lip;
+    // void cells inside the frame: recessed purple panels
+    const voids = [];
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (!isB(x, y)) voids.push([x, y]);
+    if (voids.length) {
+      const vp = cellsPath(voids, 0.07, 0.16, 0.07);
+      g.fillStyle = FRAME.void;
+      g.fill(vp);
+      g.save();
+      g.clip(vp);
+      g.shadowColor = 'rgba(30, 10, 80, 0.55)';
+      g.shadowBlur = 0.1 * S;
+      g.shadowOffsetY = 0.05 * S;
+      g.fillStyle = '#000';
+      g.fill(inverse(vp, -2, -2, w + 2, h + 2), 'evenodd');
+      g.restore();
+      g.lineWidth = L * 0.9;
+      g.strokeStyle = rgba(FRAME.outline, 0.7);
+      g.stroke(vp);
+    }
+    // floor: dark inner outline, light grid colour, rounded tiles in two close tones
+    const floor = regionPath(isB, w, h, 0, 0.1, 0.06);
+    g.lineWidth = 2 * L * 1.15;
+    g.strokeStyle = FRAME.inner;
     g.stroke(floor);
-    g.fillStyle = FLOOR_B;
+    g.fillStyle = FLOOR.grid;
     g.fill(floor);
     g.save();
     g.clip(floor);
-    g.fillStyle = FLOOR_A;
-    g.beginPath();
-    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (isB(x, y) && (x + y) % 2 === 0) g.rect(x, y, 1, 1);
-    g.fill();
-    // soft tile bevel
-    g.strokeStyle = 'rgba(255,255,255,0.55)';
-    g.lineWidth = 0.025;
-    g.beginPath();
-    for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) {
-        if (!isB(x, y)) continue;
-        g.moveTo(x + 0.06, y + 0.035);
-        g.lineTo(x + 0.94, y + 0.035);
+    for (const [tone, odd] of [[FLOOR.a, 0], [FLOOR.b, 1]]) {
+      g.fillStyle = tone;
+      g.beginPath();
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          if (isB(x, y) && (x + y) % 2 === odd) rrect(g, x + 0.028, y + 0.028, 0.944, 0.944, 0.075);
+        }
       }
+      g.fill();
     }
-    g.stroke();
-    // inner shadow cast by the frame
-    g.shadowColor = 'rgba(140, 80, 30, 0.42)';
-    g.shadowBlur = 0.14 * S;
-    g.shadowOffsetY = 0.06 * S;
+    // shade cast by the frame on the top edges of the floor
+    g.shadowColor = 'rgba(80, 30, 120, 0.32)';
+    g.shadowBlur = 0.12 * S;
+    g.shadowOffsetY = 0.05 * S;
     g.fillStyle = '#000';
     g.fill(inverse(floor, -2, -2, w + 2, h + 2), 'evenodd');
     g.restore();
@@ -2496,7 +2582,7 @@ export function createArt() {
     const D = 0.13;
     const path = cellsPath(cells, 0.035, 0.2, 0.08);
     g.save();
-    g.shadowColor = 'rgba(70, 50, 120, 0.4)';
+    g.shadowColor = 'rgba(60, 30, 120, 0.4)';
     g.shadowBlur = 0.1 * S;
     g.shadowOffsetY = 0.05 * S;
     g.fillStyle = WALL.side2;
@@ -2521,14 +2607,13 @@ export function createArt() {
     tg.addColorStop(1, WALL.top2);
     g.fillStyle = tg;
     g.fill(path);
-    // top-face gloss, then one tufted button per cell (a soft lavender cushion block)
+    // top-face gloss, then one tufted button per cell (a soft lilac cushion block)
     g.save();
     g.clip(path);
     band(g, inverse(path, -2, -2, w + 2, h + 2), 0.03, 0.05, 'rgba(255,255,255,0.75)');
     for (const [x, y] of cells) {
       const cx = x + 0.5;
       const cy = y + 0.5;
-      // puffy quadrants: light on the upper-left of each, crease toward the corners
       g.strokeStyle = rgba(WALL.outline, 0.28);
       g.lineWidth = lw * 0.8;
       g.beginPath();
@@ -2574,17 +2659,19 @@ export function createArt() {
       cell = nc;
       dpr = nd;
       S = cell * dpr;
-      lw = Math.max(0.034, 1.15 / cell);
+      lw = Math.max(0.032, 1.1 / cell);
       art.cell = cell;
       art.dpr = dpr;
-      art.boardMargin = Math.ceil(cell * (FRAME_W + FRAME_D + 0.42));
+      art.boardMargin = Math.ceil(cell * (FRAME_W + FRAME_D + 0.32));
       art.frameWidth = cell * FRAME_W;
       art.frameBottom = cell * (FRAME_W + FRAME_D);
     },
     renderBoard,
     drawCrate,
+    drawTrail,
     drawHole,
     drawHoleBadge,
+    badgeAt,
     holeCenter,
     clipHole,
     drawCat,
@@ -2596,23 +2683,23 @@ export function createArt() {
     clear,
     /**
      * Paints sprites ahead of time (they are otherwise painted on first use, ~1 ms each), e.g. while a
-     * level fades in. o: { colors = all 8, holes = [{ cells, c, axis, need }] }.
+     * level fades in. o: { colors = all, holes = [{ cells, c, axis, need, next }] }.
      */
     prewarm(o = EMPTY) {
-      const colors = o.colors || [0, 1, 2, 3, 4, 5, 6, 7];
-      for (const c of colors) {
-        for (let v = 0; v < NV; v++) baseSp(c & 7, v);
-        earSp(c & 7);
-        tailSp(c & 7, 0);
-        tailSp(c & 7, 1);
+      const colors = o.colors || PALETTE.map((_, i) => i);
+      for (const c0 of colors) {
+        const c = col(c0);
+        bodySp(c);
+        for (let big = 0; big < 2; big++) for (let st = 0; st < 4; st++) faceSp(LOOKS[c].eyes, big, st);
+        trailSp(c);
       }
-      for (let big = 0; big < 2; big++) for (let st = 0; st < 4; st++) faceSp(big, st);
       shadowSp();
       keySp();
       collarSp();
       for (const h of o.holes || []) {
-        holeEntry(h.cells, h.c & 7, h.axis === 'h' || h.axis === 'v' ? h.axis : null);
-        if (h.need > 0) badgeSp(h.need, h.c & 7);
+        const c = col(h.c);
+        holeEntry(h.cells, c, h.axis === 'h' || h.axis === 'v' ? h.axis : null, Array.isArray(h.next) ? h.next : NO_NEXT);
+        if (h.need > 0) badgeSp(h.need, c);
       }
     },
     /** Colour-blind marks: a small per-colour symbol on each cat's belly and in each pit. Off by default. */

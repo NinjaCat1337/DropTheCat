@@ -6,7 +6,7 @@
 <title>Meow Drop · DropTheCat</title>
 <meta name="description" content="A cozy cat puzzle: slide the coloured holes under the cats of the same colour and drop them all in. No timer, no rush.">
 <meta name="color-scheme" content="light">
-<meta name="theme-color" content="#7FD1FF">
+<meta name="theme-color" content="#9E84F4">
 <link rel="manifest" href="./manifest.webmanifest">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
@@ -17,7 +17,7 @@
 <link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png">
 <link rel="icon" type="image/svg+xml" href="./icons/icon.svg">
 <link rel="preload" href="./fonts/nunito-latin-900-normal.woff2" as="font" type="font/woff2" crossorigin>
-<style>html,body{margin:0;height:100%;background:#93AEFC}</style>
+<style>html,body{margin:0;height:100%;background:#A48DF5}</style>
 <link rel="stylesheet" href="./css/style.css">
 <script type="module" src="./src/main.js"></script>
 </head>
@@ -29,7 +29,11 @@
     <button id="btn-home" class="icon-btn" type="button" aria-label="Back to the level map">
       <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 2.6 1.8 11.2a1.2 1.2 0 0 0 1.6 1.8l.8-.7V20a1.6 1.6 0 0 0 1.6 1.6h3.6v-5.4a1.6 1.6 0 0 1 1.6-1.6h2a1.6 1.6 0 0 1 1.6 1.6v5.4h3.6a1.6 1.6 0 0 0 1.6-1.6v-7.7l.8.7a1.2 1.2 0 0 0 1.6-1.8z"/></svg>
     </button>
-    <div class="level-title"><span id="level-name">Level 1</span><span id="hard-badge" class="hard-badge" hidden>Hard</span></div>
+    <div class="level-title">
+      <span class="level-tag" id="level-name" aria-label="Level 1"><small>Level</small><b id="level-num">1</b></span>
+      <span id="hard-badge" class="hard-badge" hidden>Hard</span>
+    </div>
+    <div class="coin-pill small" aria-label="Coins"><i class="coin" aria-hidden="true"></i><span data-coins>0</span></div>
     <button id="btn-settings-game" class="icon-btn" type="button" aria-label="Settings">
       <svg viewBox="-1 -1 26 26" aria-hidden="true" focusable="false"><path fill-rule="evenodd" d="M9.52 3.98L9.81 1.22L14.19 1.22L14.48 3.98L15.92 4.57L18.080 2.83L21.17 5.92L19.43 8.08L20.02 9.52L22.78 9.81L22.78 14.19L20.02 14.48L19.43 15.92L21.17 18.08L18.08 21.17L15.92 19.43L14.48 20.02L14.19 22.78L9.81 22.78L9.52 20.02L8.08 19.43L5.92 21.17L2.83 18.08L4.57 15.92L3.98 14.48L1.22 14.19L1.22 9.81L3.98 9.52L4.57 8.08L2.83 5.920L5.92 2.83L8.08 4.57ZM15.50 12a3.5 3.5 0 1 0 -7.00 0a3.5 3.5 0 1 0 7.00 0Z"/></svg>
     </button>

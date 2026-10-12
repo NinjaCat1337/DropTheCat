@@ -7,20 +7,23 @@
 //   { w, h,
 //     grid:  string[h], each w chars: '.' floor, '#' wall, '_' void (not part of the board),
 //            'L' locked crate standing on floor (blocks holes until a key cat drops),
-//     cats:  [[x, y, color, mods?], ...]   color 0..7; mods (optional object):
+//     cats:  [[x, y, color, mods?], ...]   color 0..11; mods (optional object):
 //            { box: 1 }  hidden in a box: blocks every hole until a cat next to it (4-neighbour) drops,
 //            { ice: n }  frozen: blocks every hole until n more cats (anywhere) have dropped,
 //            { key: 1 }  carries the key: when it drops, every 'L' crate opens,
-//     holes: [{ x, y, c, cells: [[dx, dy], ...], need, axis?: 'h' | 'v' }, ...] }
+//     holes: [{ x, y, c, cells: [[dx, dy], ...], need, next?: [[c2, need2], ...], axis?: 'h' | 'v' }, ...] }
 // x = column (0 = left), y = row (0 = top). A hole at (x, y) covers (x + dx, y + dy) for each of its cells.
-// Per colour, the holes' needs must add up to the number of cats of that colour.
+// Layered holes: a hole with `next` first takes `need` cats of colour c; then it turns colour c2 and takes
+// need2 cats, and so on; it closes after its last layer. A colour used by a layered hole may not be used by
+// any other hole (or twice in its layers), so a layer never finishes while it still covers a cat of its colour.
+// Per colour, the needs of all layers must add up to the number of cats of that colour.
 import { normalize, isConnected } from './shapes.js';
 
 export const VOID = 0;
 export const FLOOR = 1;
 export const WALL = 2;
 export const LOCK = 3;
-export const MAX_COLORS = 8;
+export const MAX_COLORS = 12;
 export const DIRS = Object.freeze([[1, 0], [-1, 0], [0, 1], [0, -1]]);
 
 const BOX = 1;
@@ -99,6 +102,7 @@ export function compileLevel(def) {
   const need = new Int16Array(def.holes.length);
   const taken = new Int8Array(n).fill(-1);
   const needPerColor = new Array(MAX_COLORS).fill(0);
+  const users = Array.from({ length: MAX_COLORS }, () => []);
   def.holes.forEach((hole, k) => {
     if (!hole || typeof hole !== 'object') fail(`hole ${k} is not an object`);
     const { c, axis } = hole;
@@ -115,6 +119,17 @@ export function compileLevel(def) {
     for (const [dx, dy] of hole.cells) {
       mx = Math.min(mx, dx);
       my = Math.min(my, dy);
+    }
+    const layers = [{ c, need: hole.need }];
+    if (hole.next !== undefined && hole.next !== null) {
+      if (!Array.isArray(hole.next) || hole.next.length > 7) fail(`hole ${k}: bad next layers`);
+      for (const layer of hole.next) {
+        if (!Array.isArray(layer) || layer.length !== 2) fail(`hole ${k}: a layer must be [colour, need]`);
+        const [lc, ln] = layer;
+        if (!Number.isInteger(lc) || lc < 0 || lc >= MAX_COLORS) fail(`hole ${k}: bad layer colour ${lc}`);
+        if (!Number.isInteger(ln) || ln < 1) fail(`hole ${k}: layer need must be ≥ 1`);
+        layers.push({ c: lc, need: ln });
+      }
     }
     const cells = normalize(hole.cells);
     const ox = hole.x + mx;
@@ -136,14 +151,24 @@ export function compileLevel(def) {
     hx[k] = ox;
     hy[k] = oy;
     need[k] = hole.need;
-    needPerColor[c] += hole.need;
+    for (const layer of layers) {
+      needPerColor[layer.c] += layer.need;
+      users[layer.c].push(k);
+    }
     holes.push(Object.freeze({
       c,
+      layers: Object.freeze(layers.map((layer) => Object.freeze(layer))),
       axis: axis || null,
       cells: Object.freeze(cells.map((p) => Object.freeze(p))),
       bw,
       bh,
     }));
+  });
+  holes.forEach((hole, k) => {
+    if (hole.layers.length < 2) return;
+    for (const { c } of hole.layers) {
+      if (users[c].length !== 1) fail(`hole ${k}: layered colour ${c} must belong to this hole alone, once`);
+    }
   });
   for (let c = 0; c < MAX_COLORS; c++) {
     if (perColor[c] !== needPerColor[c]) {
@@ -178,6 +203,7 @@ export function compileLevel(def) {
  *   { type: 'ice', x, y, left }                       a frozen cat thawed a bit
  *   { type: 'melt', x, y, c }                         the ice is gone
  *   { type: 'unlock', cells: [[x, y], ...] }          the key opened every crate
+ *   { type: 'layer', hole, c, prev, need, hx, hy }    a layer is full: the hole turned colour c (from prev)
  *   { type: 'complete', hole, x, y }                  the hole is full and closed
  *   { type: 'win' }                                   every hole has closed
  */
@@ -192,6 +218,7 @@ export class Game {
     this.hx = L.hole0.x.slice();
     this.hy = L.hole0.y.slice();
     this.need = L.hole0.need.slice();
+    this.layer = new Uint8Array(L.holes.length);
     this.locked = L.hasLocks;
     this.dropped = 0;
     this.holeAt = new Int8Array(L.n);
@@ -233,6 +260,7 @@ export class Game {
     g.hx = this.hx.slice();
     g.hy = this.hy.slice();
     g.need = this.need.slice();
+    g.layer = this.layer.slice();
     g.locked = this.locked;
     g.dropped = this.dropped;
     g.holeAt = this.holeAt.slice();
@@ -248,6 +276,7 @@ export class Game {
       hx: this.hx.slice(),
       hy: this.hy.slice(),
       need: this.need.slice(),
+      layer: this.layer.slice(),
       locked: this.locked,
       dropped: this.dropped,
     };
@@ -261,6 +290,8 @@ export class Game {
     this.hx.set(s.hx);
     this.hy.set(s.hy);
     this.need.set(s.need);
+    if (s.layer) this.layer.set(s.layer);
+    else this.layer.fill(0);
     this.locked = s.locked;
     this.dropped = s.dropped;
     this.rebuild();
@@ -277,6 +308,7 @@ export class Game {
       hx: Array.from(s.hx),
       hy: Array.from(s.hy),
       need: Array.from(s.need),
+      layer: Array.from(s.layer),
       locked: s.locked,
       dropped: s.dropped,
     };
@@ -299,7 +331,14 @@ export class Game {
         const c = data.color[i];
         if (c !== -1 && c !== L.cat0.color[i]) return null; // cats only ever disappear
       }
-      for (let k = 0; k < m; k++) if (data.need[k] < 0 || data.need[k] > L.hole0.need[k]) return null;
+      const layer = data.layer === undefined ? new Array(m).fill(0) : data.layer;
+      if (!ints(layer, m)) return null;
+      for (let k = 0; k < m; k++) {
+        const layers = L.holes[k].layers;
+        if (layer[k] < 0 || layer[k] >= layers.length) return null;
+        if (data.need[k] < 0 || data.need[k] > layers[layer[k]].need) return null;
+        if (data.need[k] === 0 && layer[k] !== layers.length - 1) return null;
+      }
       g.restore({
         color: Int8Array.from(data.color),
         flags: Uint8Array.from(data.flags),
@@ -307,6 +346,7 @@ export class Game {
         hx: Int16Array.from(data.hx),
         hy: Int16Array.from(data.hy),
         need: Int16Array.from(data.need),
+        layer: Uint8Array.from(layer),
         locked: !!data.locked && L.hasLocks,
         dropped: Number.isInteger(data.dropped) ? data.dropped : 0,
       });
@@ -334,7 +374,7 @@ export class Game {
   stateKey() {
     let s = '';
     for (let k = 0; k < this.hx.length; k++) {
-      s += this.need[k] > 0 ? `${this.hx[k]},${this.hy[k]},${this.need[k]};` : '-;';
+      s += this.need[k] > 0 ? `${this.hx[k]},${this.hy[k]},${this.layer[k]},${this.need[k]};` : '-;';
     }
     let bits = 0;
     let nb = 0;
@@ -349,8 +389,19 @@ export class Game {
     return s + bits.toString(36);
   }
 
+  /** Colour of the hole's current layer. */
   holeColor(k) {
-    return this.L.holes[k].c;
+    return this.L.holes[k].layers[this.layer[k]].c;
+  }
+
+  /** Index of the hole's current layer (0 = first). */
+  holeLayer(k) {
+    return this.layer[k];
+  }
+
+  /** Colours of the layers still to come after the current one (empty for single-layer holes). */
+  holeNext(k) {
+    return this.L.holes[k].layers.slice(this.layer[k] + 1).map((layer) => layer.c);
   }
 
   holeCells(k) {
@@ -405,7 +456,7 @@ export class Game {
     const i = y * w + x;
     const o = this.holeAt[i];
     if (o !== -1 && o !== k) return false;
-    return this.cellOpen(this.L.holes[k].c, i);
+    return this.cellOpen(this.holeColor(k), i);
   }
 
   /** True when hole k may stand with its origin at (x, y). */
@@ -439,9 +490,9 @@ export class Game {
   /** Drops the matching cats under hole k (in cell order) until it is full. */
   collect(k, events = []) {
     const { w } = this.L;
-    const c = this.L.holes[k].c;
+    const c = this.holeColor(k);
     for (const [dx, dy] of this.L.holes[k].cells) {
-      if (this.need[k] <= 0) break;
+      if (this.need[k] <= 0 || this.holeColor(k) !== c) break;
       const i = (this.hy[k] + dy) * w + this.hx[k] + dx;
       if (this.color[i] === c && (this.flags[i] & BOX) === 0 && this.ice[i] === 0) this.drop(i, k, events, false);
     }
@@ -493,7 +544,16 @@ export class Game {
         events.push({ type: 'unlock', cells });
       }
     }
-    if (this.need[k] === 0) {
+    const layers = this.L.holes[k].layers;
+    if (this.need[k] === 0 && this.layer[k] + 1 < layers.length) {
+      // Layer filled: the hole turns the next colour and wants that layer's cats.
+      const prev = layers[this.layer[k]].c;
+      this.layer[k]++;
+      this.need[k] = layers[this.layer[k]].need;
+      if (events) {
+        events.push({ type: 'layer', hole: k, c: layers[this.layer[k]].c, prev, need: this.need[k], hx: this.hx[k], hy: this.hy[k] });
+      }
+    } else if (this.need[k] === 0) {
       this.mark(k, -1);
       if (events) {
         events.push({ type: 'complete', hole: k, x: this.hx[k], y: this.hy[k] });
@@ -516,15 +576,17 @@ export class Game {
 
   /**
    * Cat treat booster: the nearest active (not boxed, not frozen) cats of the hole's colour jump into it
-   * until it is full or none is left. Returns the events (drops carry fly: true and their cell).
+   * until its current layer is full or none is left. Returns the events (drops carry fly: true and their cell).
    */
   treat(k, events = []) {
     if (this.need[k] <= 0) return events;
     const { w } = this.L;
-    const { c, bw, bh } = this.L.holes[k];
+    const { bw, bh } = this.L.holes[k];
+    const c = this.holeColor(k);
+    const layer = this.layer[k];
     const cx = this.hx[k] + (bw - 1) / 2;
     const cy = this.hy[k] + (bh - 1) / 2;
-    while (this.need[k] > 0) {
+    while (this.need[k] > 0 && this.layer[k] === layer) {
       let best = -1;
       let bestD = Infinity;
       for (const i of this.L.catCells) {
@@ -551,7 +613,8 @@ export class Game {
     if (this.need[k] <= 0) return false;
     const { w, h } = this.L;
     const hole = this.L.holes[k];
-    const { c, cells, axis, bw, bh } = hole;
+    const { cells, axis, bw, bh } = hole;
+    const c = this.holeColor(k);
     const seen = new Uint8Array(w * h);
     const fits = (x, y) => {
       if (x < 0 || y < 0 || x + bw > w || y + bh > h) return false;
