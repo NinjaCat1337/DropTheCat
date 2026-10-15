@@ -996,13 +996,28 @@ function solvePlain(game, opts) {
   return null;
 }
 
+// The rest of the line the last hint came from: when the player plays that hint, the next one continues the
+// same line (a fresh search could pick another line and send a hole straight back).
+let lastLine = null;
+
 /**
- * The next drag of a winning line from the current state.
+ * The next drag of a winning line from the current state (hungry deadlines counted from game.moves).
  * @returns {{ hole: number, path: string } | null}
  */
 export function hint(game, opts = {}) {
-  const r = solve(game, opts);
-  return r && r.moves.length ? r.moves[0] : null;
+  let moves = null;
+  if (lastLine && lastLine.L === game.L && lastLine.key === game.stateKey() && lastLine.moves.length) {
+    if (winsInTime(game, lastLine.moves.map((mv) => [mv.hole, mv.path]))) moves = lastLine.moves;
+  }
+  if (!moves) {
+    const r = solve(game, opts);
+    moves = r && r.moves.length ? r.moves : null;
+  }
+  lastLine = null;
+  if (!moves) return null;
+  const next = game.clone();
+  if (applyPath(next, moves[0].hole, moves[0].path)) lastLine = { L: game.L, key: next.stateKey(), moves: moves.slice(1) };
+  return moves[0];
 }
 
 // ---------------------------------------------------------------------------------------------------------

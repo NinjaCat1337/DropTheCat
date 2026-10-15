@@ -11,6 +11,8 @@ import {
   verifySolution,
   verifyDrags,
   difficulty,
+  randomSolve,
+  fiddleBudget,
   targetDifficulty,
   isHard,
   mosaic,
@@ -136,7 +138,8 @@ test('playStats and evaluateLevel measure a level', () => {
   const ev = evaluateLevel(def, { playouts: 10, seed: 3 });
   assert.equal(ev.solvable, true);
   assert.equal(ev.solutionOk, true);
-  assert.equal(ev.difficulty, difficulty(st));
+  assert.ok(ev.fail >= 0 && ev.fail <= 1 && ev.shuffle >= 0 && ev.shuffle <= 1);
+  assert.equal(ev.difficulty, difficulty({ ...st, fail: ev.fail, shuffle: ev.shuffle }));
   assert.equal(ev.cats, def.cats.length);
   assert.equal(ev.holes, def.holes.length);
   assert.ok(ev.mosaic >= 0 && ev.mosaic <= 1);
@@ -144,20 +147,30 @@ test('playStats and evaluateLevel measure a level', () => {
   assert.equal(mosaic({ w: 2, h: 1, cats: [[0, 0, 1], [1, 0, 2]] }), 0);
 });
 
-test('the campaign curve: tighter, harder, one new thing per intro level', () => {
+test('random solve: how often fiddling wins within the drag budget', () => {
+  const easy = { id: 1, w: 4, h: 2, grid: ['....', '....'], cats: [[2, 0, 0], [3, 0, 0], [2, 1, 2], [3, 1, 2]], holes: [{ x: 0, y: 0, c: 0, cells: [[0, 0], [1, 0]], need: 2 }, { x: 0, y: 1, c: 2, cells: [[0, 0], [1, 0]], need: 2 }] };
+  const rs = randomSolve(easy, 12, 5, fiddleBudget(2));
+  assert.equal(rs.fail, 0, 'a trivial level is solved by fiddling');
+  assert.ok(rs.median >= 2 && rs.median <= 10);
+  assert.deepEqual(randomSolve(easy, 12, 5, 10), randomSolve(easy, 12, 5, 10), 'deterministic');
+  assert.equal(fiddleBudget(30), 60);
+  assert.equal(fiddleBudget(4), 20);
+});
+
+test('the campaign curve: hard from the start, one new thing per intro level, no gates', () => {
   let last = -1;
   for (let n = 4; n <= 100; n++) {
     const t = targetDifficulty(n);
     assert.ok(t >= last - 1e-9, `target(${n})`);
     last = t;
   }
-  assert.ok(targetDifficulty(20) > targetDifficulty(10) + 1.5, 'it climbs from level 15 on');
+  assert.ok(targetDifficulty(4) >= 6, 'hard from level 4 on');
+  assert.ok(targetDifficulty(100) > targetDifficulty(4) + 3, 'and rising');
   const has = {
     layers: (P) => P.layered > 0,
     walls: (P) => P.fence || P.split || P.walls > 0,
     pentomino: (P) => Object.keys(P.shapes).some((s) => s.endsWith('5')),
     ice: (P) => P.ice > 0,
-    gates: (P) => P.gates > 0,
     box: (P) => P.box > 0,
     hungry: (P) => P.hungry > 0,
     axis: (P) => P.axis > 0,
@@ -172,7 +185,6 @@ test('the campaign curve: tighter, harder, one new thing per intro level', () =>
     assert.ok(P.target[1] < targetDifficulty(at), `intro ${at} is gentle`);
     for (const [other, test2] of Object.entries(has)) {
       if (other === name || INTRO[other] > at || other === 'layers' || other === 'pentomino') continue;
-      if (name === 'gates' && other === 'walls') continue; // gates sit on narrow passages
       assert.ok(!test2(P), `intro ${at} (${name}) shows nothing else new: ${other}`);
     }
   }
@@ -184,7 +196,9 @@ test('the campaign curve: tighter, harder, one new thing per intro level', () =>
     assert.equal(isHard(n), n % 10 === 0);
     assert.ok(P.w <= 7 && P.h <= 10, `size ${n}`);
     assert.ok(P.holes + P.layered <= P.maxColors && P.maxColors <= MAX_COLORS, `colours ${n}`);
-    if (n >= 60 && !P.intro) assert.ok(P.empty[1] <= 2, `late level ${n} has 1-2 free cells`);
+    assert.ok(!P.gates, `no gates on level ${n}`);
+    assert.equal(P.openers, 1, `one hole can eat at the start of level ${n}`);
+    assert.ok(P.empty[1] <= (n <= 9 ? 2 : 1), `level ${n}: one free cell (two on a few early levels)`);
     if (P.hard && n >= 20) {
       assert.ok(P.empty[1] <= 2 && P.openers === 1, `hard ${n} is tight`);
       assert.ok(P.target[0] > levelParams(n - 1).target[1], `hard ${n} aims higher`);

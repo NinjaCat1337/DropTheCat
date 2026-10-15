@@ -80,6 +80,9 @@ function makeLevel(n) {
       difficulty: Math.round(ev.difficulty * 100) / 100,
       stalls: Math.round(ev.stalls * 100) / 100,
       startHoles: ev.startHoles,
+      fiddleFail: Math.round(ev.fail * 100) / 100,
+      fiddleDrags: ev.fiddle,
+      shuffle: Math.round(ev.shuffle * 100) / 100,
     };
     return def;
   }
@@ -119,7 +122,7 @@ function main() {
   const args = parseArgs(process.argv.slice(2));
   const ids = args.only ? [args.only] : Array.from({ length: COUNT }, (_, i) => i + 1);
   const levels = [];
-  console.log('  #  size col holes cats empty   par steps  diff stalls start mosaic nodes   ms  features');
+  console.log('  #  size col holes cats empty   par steps  diff stalls start  fail fiddle shuffle mosaic nodes   ms  features');
   const t0 = Date.now();
   for (const n of ids) {
     const t1 = Date.now();
@@ -140,6 +143,9 @@ function main() {
       pad(st.difficulty.toFixed(2), 5),
       pad(st.stalls.toFixed(2), 6),
       pad(st.startHoles, 5),
+      pad(st.fiddleFail.toFixed(2), 5),
+      pad(st.fiddleDrags, 6),
+      pad(st.shuffle.toFixed(2), 7),
       pad(ev.mosaic.toFixed(2), 6),
       pad(ev.nodes, 5),
       pad(ms, 4),

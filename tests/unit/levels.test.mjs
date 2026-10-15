@@ -16,7 +16,6 @@ const has = {
   walls: (d) => d.grid.some((r) => r.includes('#')),
   pentomino: (d) => d.holes.some((h) => h.cells.length === 5),
   ice: (d) => mods(d, 'ice') > 0,
-  gates: (d) => !!(d.gates && d.gates.length),
   box: (d) => mods(d, 'box') > 0,
   hungry: (d) => mods(d, 'hungry') > 0,
   axis: (d) => d.holes.some((h) => h.axis),
@@ -181,14 +180,25 @@ test('tutorials: tiny packed boards, one clear drag per hole', () => {
   for (const n of [1, 2]) assert.ok(getLevel(n).solution.every(([, path]) => /^(U+|D+|L+|R+)$/.test(path)), `level ${n}: straight drags`);
 });
 
-test('each mechanic comes first on its own gentle level', () => {
+test('each mechanic comes first on its own level, gentler than the levels after it', () => {
   const diff = (n) => getLevel(n).stats.difficulty;
+  const intros = new Set(Object.values(INTRO));
   for (const [name, at] of Object.entries(INTRO)) {
     let first = 0;
     for (let n = 1; n <= LEVEL_COUNT && !first; n++) if (has[name](getLevel(n))) first = n;
     assert.equal(first, at, `${name}: first on level ${at}`);
-    const around = [diff(at - 2), diff(at - 1), diff(at + 1), diff(at + 2)].sort((a, b) => a - b);
-    assert.ok(diff(at) <= around[2], `intro ${at} (${diff(at)}) is not harder than its neighbours`);
+    const next = [];
+    for (let n = at + 1; next.length < 3; n++) if (!intros.has(n) && !isHardLevel(n)) next.push(diff(n));
+    const mean = next.reduce((a, b) => a + b, 0) / next.length;
+    assert.ok(diff(at) < mean, `intro ${at} (${diff(at)}) is gentler than the next levels (${mean.toFixed(2)})`);
+  }
+});
+
+test('no gates anywhere; one free cell from level 10 on', () => {
+  for (let n = 1; n <= 120; n++) {
+    const def = getLevel(n);
+    assert.ok(!def.gates || !def.gates.length, `level ${n} has no gates`);
+    if (n >= 10) assert.equal(emptyCells(def), 1, `level ${n}: one free cell`);
   }
 });
 

@@ -122,18 +122,7 @@ try {
   }
   console.log('PASS levels 2–12, 18, 28, 50 replayed by touch, each for 3 stars');
 
-  // Tapping something on the board explains it.
-  await play(page, 18);
-  const gateAt = await page.evaluate(() => {
-    const [x, y] = window.__dropcat.def.gates[0];
-    return window.__dropcat.cellCenter(x, y);
-  });
-  await page.mouse.click(gateAt.x, gateAt.y);
-  await page.waitForFunction(() => {
-    const tip = document.querySelector('#tip');
-    return !tip.hidden && /only the \w+ hole can pass/.test(tip.textContent);
-  });
-  console.log('PASS tapping a gate explains it');
+
 
   // Undo and restart.
   await play(page, 6);

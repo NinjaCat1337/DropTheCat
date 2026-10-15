@@ -83,6 +83,9 @@ export const DEFAULT_PARAMS = Object.freeze({
   candidates: 6,
   attempts: 200,
   playouts: 24,
+  fiddles: 16, // random-solve playouts (see randomSolve)
+  mosaicWeight: 0.8, // how much a candidate's lack of mosaic counts against it
+  minShuffle: 0, // wanted share of drags that swallow nothing (candidates below it score worse)
   hard: false,
 });
 
@@ -264,8 +267,8 @@ function makePlan(P, rng, board) {
       hole.size = SIZE[hole.name];
       hole.cells = rng.pick(ORIENTS[hole.name]);
     }
-    // Axis locks on single-layer holes with a straight or square shape.
-    const axisable = rng.shuffle(holes.filter((hole) => hole.layers === 1 && ['I2', 'I3', 'O4', 'I1'].includes(hole.name)));
+    // Any hole may be axis-locked (straight ones first): it slides only along its axis.
+    const axisable = rng.shuffle(holes.slice()).sort((x, y) => Number(!['I2', 'I3', 'I4', 'I5', 'O4', 'I1'].includes(x.name)) - Number(!['I2', 'I3', 'I4', 'I5', 'O4', 'I1'].includes(y.name)));
     for (let i = 0; i < Math.min(P.axis, axisable.length); i++) {
       const hole = axisable[i];
       const [bw, bh] = hole.cells.reduce(([a, b], [dx, dy]) => [Math.max(a, dx + 1), Math.max(b, dy + 1)], [0, 0]);
@@ -914,14 +917,72 @@ export function playStats(level, n, seed) {
 }
 
 /**
+ * "Random solve": how far a player gets by fiddling. Each drag either swallows what some hole reaches right
+ * now (a random such drag, 60% of the time when there is one) or slides a random hole to a random place it
+ * can reach. Returns the share of playouts that do not win within `budget` drags (fail) and the median number
+ * of drags used (a failed playout counts as the budget).
+ */
+export function randomSolve(level, n, seed, budget = 60) {
+  const L = level && level.ground instanceof Uint8Array ? level : compileLevel(level);
+  const ex = explorer(L);
+  const rng = createRng(seed);
+  const g0 = new Game(L);
+  const used = [];
+  let fails = 0;
+  for (let r = 0; r < n; r++) {
+    const g = g0.clone();
+    let d = 0;
+    while (!g.isWon() && d < budget) {
+      const eat = [];
+      const slide = [];
+      for (let k = 0; k < g.need.length; k++) {
+        if (g.need[k] <= 0) continue;
+        const sc = ex.scan(g, k);
+        if (sc.targets.length) eat.push(sc);
+        if (sc.region.length > 1) slide.push(sc);
+      }
+      let sc;
+      let q;
+      if (eat.length && (!slide.length || rng.chance(0.6))) {
+        sc = rng.pick(eat);
+        q = rng.pick(sc.targets);
+      } else if (slide.length) {
+        sc = rng.pick(slide);
+        q = sc.region[1 + rng.int(sc.region.length - 1)];
+      } else break;
+      applyPath(g, sc.k, ex.pathTo(sc, q));
+      d++;
+    }
+    if (!g.isWon()) fails++;
+    used.push(g.isWon() ? d : budget);
+  }
+  used.sort((a, b) => a - b);
+  return { fail: n ? fails / n : 0, median: n ? used[n >> 1] : 0 };
+}
+
+/** Share of the drags of a line (list of [hole, path]) that swallow nothing: pure shuffling of the holes. */
+export function shuffleShare(def, line) {
+  if (!line.length) return 0;
+  const g = new Game(def);
+  let idle = 0;
+  for (const [k, path] of line) {
+    const before = g.catsLeft();
+    applyPath(g, k, path);
+    if (g.catsLeft() === before) idle++;
+  }
+  return idle / line.length;
+}
+
+/**
  * Difficulty of a level (no timer, no dead ends): how hard it is to find a way through it. Grows with the
  * stalls a random player runs into (the board has to be rearranged before anyone can eat), the slides those
- * need, a tight opening (few holes able to eat) and few choices along the way.
+ * need, a tight opening (few holes able to eat), few choices along the way, how often fiddling fails to win
+ * within the drag budget (fail) and how much of the solution is pure shuffling (shuffle).
  */
 export function difficulty(st) {
   const opening = 1 / Math.max(1, st.startHoles);
   const tight = 1 / Math.max(1, st.branching);
-  return st.stalls * 0.6 + st.repo * 0.08 + opening * 0.8 + tight * 1.2;
+  return st.stalls * 0.6 + st.repo * 0.08 + opening * 0.8 + tight * 1.2 + (st.fail || 0) * 5 + (st.shuffle || 0) * 3;
 }
 
 /**
@@ -935,6 +996,10 @@ export function evaluateLevel(def, opts = {}) {
   const sol = solve(game, { maxNodes: opts.maxNodes ?? 30000 });
   const st = playStats(L, opts.playouts ?? 24, opts.seed ?? 12345);
   const solution = def.solution || null;
+  const rs = randomSolve(L, opts.fiddles ?? 16, opts.seed ?? 12345, fiddleBudget(solution ? solution.length : sol ? sol.moves.length : 12));
+  st.fail = rs.fail;
+  st.fiddle = rs.median;
+  st.shuffle = solution ? shuffleShare(def, solution) : 0;
   let empty = 0;
   const holeCells = new Set();
   for (const hole of def.holes) for (const [dx, dy] of hole.cells) holeCells.add((hole.y + dy) * def.w + hole.x + dx);
@@ -1023,6 +1088,11 @@ function buildCandidate(P, seed) {
   return { def, solution };
 }
 
+/** Drags a fiddling player gets in randomSolve: 5 × par, at most 60. */
+export function fiddleBudget(par) {
+  return Math.min(60, 5 * Math.max(1, par));
+}
+
 /**
  * Generates a solvable level.
  * @param {object} params see DEFAULT_PARAMS
@@ -1052,9 +1122,18 @@ export function generateLevel(params = {}, seed = 1) {
     }
     const solverLine = sol.moves.map((mv) => [mv.hole, mv.path]);
     found++;
+    // Fiddling and shuffling, measured on the shorter of the construction and solver lines (par comes later).
+    const merged = [mergeMoves(cand.solution), mergeMoves(solverLine)].sort((a, b) => a.length - b.length)[0];
+    const rs = randomSolve(L, P.fiddles, sub, fiddleBudget(merged.length));
+    st.fail = rs.fail;
+    st.fiddle = rs.median;
+    st.shuffle = shuffleShare(cand.def, merged);
     const d = difficulty(st);
     const [lo, hi] = P.target;
-    const score = (d < lo ? lo - d : d > hi ? d - hi : 0) + 1.2 * mosaic(cand.def) + rng.next() * 0.01;
+    // Also wanted: exactly one hole able to eat at the start, and a good share of pure shuffling drags.
+    const extraStart = P.intro ? 0 : Math.max(0, st.startHoles - (P.openers || 1));
+    const shortShuffle = Math.max(0, (P.minShuffle || 0) - st.shuffle);
+    const score = (d < lo ? lo - d : d > hi ? d - hi : 0) + P.mosaicWeight * mosaic(cand.def) + extraStart + 4 * shortShuffle + rng.next() * 0.01;
     if (P._debug) (P._debug.cands || (P._debug.cands = [])).push({ ...st, d, mosaic: mosaic(cand.def) });
     if (!best || score < best.score) best = { def: cand.def, lines: [cand.solution, solverLine], st, d, score };
   }
@@ -1097,6 +1176,9 @@ export function generateLevel(params = {}, seed = 1) {
     difficulty: Math.round(best.d * 100) / 100,
     stalls: Math.round(best.st.stalls * 100) / 100,
     startHoles: best.st.startHoles,
+    fiddleFail: Math.round(best.st.fail * 100) / 100,
+    fiddleDrags: best.st.fiddle,
+    shuffle: Math.round(shuffleShare(def, line) * 100) / 100,
   };
   return out;
 }
@@ -1153,12 +1235,13 @@ export function isHard(n) {
   return n % 10 === 0;
 }
 
-const SHAPES_EARLY = { I2: 3, I3: 2, L3: 3, T4: 1, O4: 1 };
-const SHAPES_MID = { I2: 3, I3: 2, L3: 3, T4: 2, L4: 2, S4: 1, O4: 1, I1: 0.5, P5: 0.6, L5: 0.5, U5: 0.4, T5: 0.4 };
-const SHAPES_LATE = { I2: 2, I3: 2, L3: 2, T4: 2, L4: 2, S4: 2, O4: 1, I1: 0.6, I4: 0.6, P5: 1, L5: 1, U5: 0.8, T5: 0.8, Z5: 0.6, V5: 0.6, I5: 0.4 };
+
+const SHAPES_EARLY = { I2: 2, I3: 2, L3: 2, T4: 2, L4: 1.5, S4: 1, O4: 1 };
+const SHAPES_MID = { I2: 2, I3: 2, L3: 2, T4: 2, L4: 2, S4: 1, O4: 1, I4: 0.6, P5: 1, L5: 0.8, U5: 0.6, T5: 0.6 };
+const SHAPES_LATE = { I2: 2, I3: 2, L3: 2, T4: 2, L4: 2, S4: 2, O4: 1, I4: 0.8, P5: 1.2, L5: 1, U5: 0.8, T5: 0.8, Z5: 0.6, V5: 0.6, I5: 0.4 };
 
 /** difficulty() aimed at by level n: one continuous, non-decreasing curve (a window is kept around it). */
-const CURVE = [[4, 1.5], [10, 2.4], [15, 3.3], [20, 4.2], [35, 5.4], [50, 6.2], [100, 7.6]];
+const CURVE = [[4, 9.5], [10, 11], [20, 12.5], [40, 14.5], [70, 16], [100, 17]];
 export function targetDifficulty(n) {
   if (n <= CURVE[0][0]) return CURVE[0][1];
   for (let i = 1; i < CURVE.length; i++) {
@@ -1171,20 +1254,22 @@ export function targetDifficulty(n) {
   return CURVE[CURVE.length - 1][1];
 }
 
-/** Number of holes that packs a w×h board (about 3 free cells) with the given number of extra layers. */
+/** Number of holes that packs a w×h board (one free cell) with the given number of extra layers. */
 function holesFor(cells, layered, avgSize) {
-  return Math.max(2, Math.round((cells - 3) / (2 * avgSize) - layered * 0.5));
+  return Math.max(2, Math.round((cells - 2) / (2 * avgSize) - layered * 0.5));
 }
 
-/** Mechanics introduced on their own gentle level (one new thing each). */
-export const INTRO = Object.freeze({ layers: 7, walls: 11, pentomino: 12, ice: 15, gates: 18, box: 25, hungry: 28, axis: 35, lock: 45 });
+/** Mechanics introduced on their own level (gentler than its neighbours, one new thing each). */
+export const INTRO = Object.freeze({ layers: 4, walls: 5, axis: 6, pentomino: 8, ice: 11, box: 12, hungry: 14, lock: 18 });
 
 /**
- * Generation parameters of level n (≥ 4; 1-3 are hand-made tutorials) on a rising difficulty curve: bigger and
- * tighter boards (fewer free cells), more layers and big shapes, narrow passages, gates and hungry cats; the
- * candidate whose difficulty() falls in a window around targetDifficulty(n) is kept. Every 10th level is hard
- * (aims well above the curve: one opener, one or two free cells). Each new mechanic comes first on a gentle
- * level of its own (see INTRO). Levels beyond the pack keep the late mix with per-level variety. Deterministic.
+ * Generation parameters of level n (≥ 4; 1-3 are hand-made tutorials). From level 4 on the boards are packed
+ * tight (one free cell, two on a few early levels), exactly one hole can eat at the start, and the holes have
+ * to shuffle out of each other's way: layered holes stay on the board, big shapes, walls and axis-locked holes
+ * constrain the moves. Difficulty (see difficulty(): stalls, fiddling that fails, shuffling share of the
+ * solution) rises along targetDifficulty(n); every 10th level is hard (aims well above the curve). Each
+ * mechanic comes first on a gentler level of its own (see INTRO); there are no gates. Levels beyond the pack
+ * keep the late mix with per-level variety. Deterministic.
  */
 export function levelParams(n) {
   const r = createRng(levelSeed(n) ^ 0xa11ce);
@@ -1193,9 +1278,10 @@ export function levelParams(n) {
   const P = {
     id: n,
     hard,
-    candidates: endless ? 4 : hard ? 60 : 30,
-    attempts: endless ? 40 : 300,
-    playouts: endless ? 12 : 32,
+    candidates: endless ? 4 : hard ? 120 : 60,
+    attempts: endless ? 300 : 1000,
+    playouts: endless ? 6 : 20,
+    fiddles: endless ? 6 : 16,
     parBeam: endless ? 8 : 96,
   };
   let intro = null;
@@ -1203,49 +1289,41 @@ export function levelParams(n) {
   const after = (k) => n > INTRO[k];
   // Board size.
   let size;
-  if (n <= 6) size = n <= 4 ? [4, 6] : [5, 6];
-  else if (n <= 10) size = [5, n <= 8 ? 6 : 7];
-  else if (n <= 20) size = n <= 14 ? [5, 7] : n <= 17 ? [5, 8] : [6, 8];
-  else if (n <= 35) size = r.chance(0.5) ? [6, 8] : [6, 9];
-  else if (n <= 50) size = r.chance(0.5) ? [6, 9] : [7, 9];
-  else size = r.pick([[6, 9], [7, 9], [7, 9], [7, 10], [6, 10]]);
-  if (hard && n > 10) size = n <= 30 ? [6, 9] : [7, n >= 60 ? 10 : 9];
+  if (n <= 6) size = [5, 7];
+  else if (n <= 10) size = r.chance(0.5) ? [6, 7] : [5, 8];
+  else if (n <= 20) size = [6, 8];
+  else if (n <= 40) size = r.chance(0.5) ? [6, 9] : [7, 9];
+  else size = r.pick([[7, 9], [7, 9], [7, 10], [6, 10]]);
+  if (hard) size = n <= 10 ? [6, 8] : n <= 30 ? [6, 9] : [7, n >= 60 ? 10 : 9];
   [P.w, P.h] = size;
-  // Free cells: 2-4 early, 1-2 late, one or two on hard levels.
-  P.empty = n <= 14 ? [2, 4] : n <= 29 ? [2, 3] : n <= 59 ? [1, 3] : [1, 2];
-  if (hard && n >= 20) P.empty = [1, 2];
-  // Layers: one layered hole from 7, then more, with 3-layer holes later.
-  P.layered = n < 7 ? 0 : n <= 14 ? 1 : n <= 30 ? 2 : n <= 50 ? r.pick([2, 3]) : r.pick([3, 3, 4]);
-  P.layers3 = n <= 30 ? 0 : n <= 50 ? 0.2 : 0.4;
-  // Shapes: pentominoes from their intro on.
+  // Free cells: one (two on a few early levels).
+  P.empty = n <= 9 && !hard ? [1, 2] : [1, 1];
+  // Layers from level 4: layered holes stay on the board and keep it packed.
+  P.layered = n < INTRO.layers ? 0 : n <= 9 ? 1 + r.int(2) : n <= 30 ? 2 + r.int(2) : r.pick([3, 3, 4]);
+  P.layers3 = n <= 9 ? 0.1 : n <= 30 ? 0.25 : 0.4;
+  // Shapes: tetrominoes from the start, pentominoes from their intro on.
   P.shapes = n < INTRO.pentomino ? SHAPES_EARLY : n <= 35 ? SHAPES_MID : SHAPES_LATE;
   if (n === INTRO.pentomino) {
     P.shapes = { ...SHAPES_EARLY, P5: 1.2 };
     P.penta = 1;
   }
-  P.palette = n <= 20 ? 8 : n <= 50 ? 10 : 12;
-  P.maxColors = n <= 10 ? 6 : n <= 20 ? 8 : n <= 50 ? 10 : 11;
-  const avg = n < INTRO.pentomino ? 3 : n <= 35 ? 3.3 : 3.7;
+  P.palette = n <= 20 ? 10 : 12;
+  P.maxColors = n <= 10 ? 8 : n <= 30 ? 10 : 11;
+  const avg = n < INTRO.pentomino ? 3.2 : n <= 35 ? 3.5 : 3.8;
   P.holes = Math.min(holesFor(P.w * P.h, P.layered, avg), P.maxColors - P.layered - (P.layers3 ? 1 : 0));
-  // Narrow passages (walls) and pillars.
+  // Walls: narrow passages and pillars.
   if (n === INTRO.walls) P.fence = true;
   else if (after('walls')) {
     const roll = r.next();
-    P.fence = roll < 0.3;
-    P.split = roll >= 0.3 && roll < 0.55;
-    P.walls = !P.fence && !P.split && r.chance(0.5) ? 1 + r.int(2) : 0;
+    P.fence = roll < 0.35;
+    P.split = roll >= 0.35 && roll < 0.6;
+    P.walls = !P.fence && !P.split && r.chance(0.6) ? 1 + r.int(2) : 0;
   }
-  if (n > 40) P.floor = ['rect', 'rect', 'rect', 'corners', 'corners4', 'notch'];
-  // Gates (they route the other holes best on narrow passages).
-  if (n === INTRO.gates) {
-    P.gates = 1;
-    P.fence = true;
-  } else if (after('gates') && r.chance(0.4)) {
-    P.gates = 1 + r.int(2);
-    if (!P.fence && !P.split) P.fence = true;
-    P.walls = 0;
-  }
-  // The other mechanics, each gentle at first, then now and then.
+  if (n > 30) P.floor = ['rect', 'rect', 'corners', 'corners4', 'notch'];
+  // Axis-locked holes: a good share of the holes after their intro.
+  if (n === INTRO.axis) P.axis = 2;
+  else if (after('axis')) P.axis = Math.max(1, Math.round(P.holes * (0.25 + 0.25 * r.next())));
+  // The other mechanics, now and then after their intro.
   if (n === INTRO.ice) P.ice = 3;
   else if (after('ice') && r.chance(0.3)) P.ice = 1 + r.int(2);
   if (n === INTRO.box) P.box = 3;
@@ -1253,36 +1331,24 @@ export function levelParams(n) {
   if (n === INTRO.hungry) {
     P.hungry = 1;
     P.hungrySlack = 3;
-  } else if (after('hungry') && r.chance(0.45)) {
+  } else if (after('hungry') && r.chance(0.4)) {
     P.hungry = 1 + r.int(2);
     P.hungrySlack = hard ? 1 : 2;
   }
-  if (n === INTRO.axis) P.axis = 2;
-  else if (after('axis') && r.chance(0.3)) P.axis = 1;
   if (n === INTRO.lock) P.lock = 3;
   else if (after('lock') && r.chance(0.25)) P.lock = 2;
-  // Openers: holes free to eat at the start (the others are walled in by other colours).
-  P.openers = hard ? 1 : n <= 6 ? P.holes - 1 : n <= 10 ? 3 : n <= 14 ? 2 : r.pick([1, 2, 2]);
+  // Exactly one hole can eat at the start; a good share of the solution is pure shuffling.
+  P.openers = 1;
+  P.minShuffle = intro ? 0.2 : hard ? 0.45 : 0.35;
   if (intro) {
-    // The new thing is the point: an easy level with room to breathe and nothing else new on it.
-    const keep = {
-      walls: ['fence'],
-      gates: ['fence', 'gates'],
-      ice: ['ice'],
-      box: ['box'],
-      hungry: ['hungry', 'hungrySlack'],
-      axis: ['axis'],
-      lock: ['lock'],
-    }[intro] || [];
-    for (const k of ['fence', 'split', 'walls', 'gates', 'ice', 'box', 'hungry', 'axis', 'lock']) if (!keep.includes(k)) delete P[k];
-    P.openers = Math.max(P.openers, 2);
-    P.empty = [2, 4];
-    if (P.hungry) P.hungrySlack = 3;
+    // The new thing is the point: nothing else new on the level (the earlier constraints step back too).
+    const keep = { walls: ['fence'], axis: ['axis'], ice: ['ice'], box: ['box'], hungry: ['hungry', 'hungrySlack'], lock: ['lock'] }[intro] || [];
+    for (const k of ['fence', 'split', 'walls', 'ice', 'box', 'hungry', 'axis', 'lock']) if (!keep.includes(k)) delete P[k];
   }
   P.intro = intro;
   const base = endless ? targetDifficulty(100) - 0.5 + r.next() : targetDifficulty(n);
-  if (intro) P.target = [0, Math.max(1.2, base - 2)];
+  if (intro) P.target = [base - 2.5, base - 1];
   else if (hard) P.target = [base + 2, base + 5];
-  else P.target = [base - 0.3, base + 0.3];
+  else P.target = [base - 0.4, base + 0.4];
   return P;
 }
