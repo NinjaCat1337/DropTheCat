@@ -4,7 +4,7 @@
 'use strict';
 
 // <precache>
-const VERSION = 'a1b67e6bc9';
+const VERSION = '844fa0e72c';
 const ASSETS = [
   './',
   './css/style.css',

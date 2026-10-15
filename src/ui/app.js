@@ -1,7 +1,7 @@
 // App controller: screens (home, game, overlays), pointer input on the board, undo / restart / boosters,
 // saving, sounds and haptics. The rules live in core/rules.js, the drawing in scene.js and art.js.
 import { Game, WALL, LOCK } from '../core/rules.js';
-import { getLevel, isHardLevel } from '../core/levels.js';
+import { getLevel, isHardLevel, LEVEL_COUNT } from '../core/levels.js';
 import { hint as findHint } from '../core/solver.js';
 import {
   newProgress, sanitizeProgress, completeLevel, useBooster, buyBooster, buySnack, markTip, PRICES, SNACK_MOVES,
@@ -18,6 +18,26 @@ import { KEYS, loadJSON, saveJSON, removeKey, requestPersistence } from '../plat
 import { initServiceWorker } from '../platform/pwa.js';
 
 const VERSION = '3.0';
+// Interim until the harder pack lands: the hardest existing levels come right after the tutorials and
+// gates are switched off. Remove when level-data.js is regenerated.
+let interimOrder = null;
+function packIndex(n) {
+  if (n <= 3 || n > LEVEL_COUNT) return n;
+  if (!interimOrder) {
+    const rest = [];
+    for (let i = 4; i <= LEVEL_COUNT; i++) rest.push({ i, d: Number((getLevel(i).stats || {}).difficulty) || 0 });
+    rest.sort((a, b) => a.d - b.d || a.i - b.i);
+    const cut = Math.floor(rest.length * 0.35);
+    interimOrder = rest.slice(cut).concat(rest.slice(0, cut)).map((r) => r.i);
+  }
+  return interimOrder[n - 4];
+}
+function loadLevel(n) {
+  const d = getLevel(packIndex(n));
+  delete d.gates;
+  return d;
+}
+const hardLevel = (n) => isHardLevel(packIndex(n));
 const OVERLAYS = ['#win', '#stuck', '#buy', '#settings', '#starve', '#coins'];
 const UNDO_LIMIT = 80;
 const SAVED_UNDO = 30;
@@ -258,7 +278,7 @@ export function createApp({ root, nosave = false, debug = false, firstLevel = nu
       li.className = 'node';
       if (i < n) li.classList.add('done');
       if (i === n) li.classList.add('current');
-      if (isHardLevel(i) && i >= n) li.classList.add('hard');
+      if (hardLevel(i) && i >= n) li.classList.add('hard');
       li.textContent = i < n ? '★'.repeat(progress.stars[i] || 1) : String(i);
       if (i < n) li.classList.add('stars-' + (progress.stars[i] || 1));
       li.setAttribute('aria-label', `Level ${i}${i < n ? `, ${progress.stars[i] || 1} stars` : i === n ? ', next' : ''}`);
@@ -272,7 +292,7 @@ export function createApp({ root, nosave = false, debug = false, firstLevel = nu
     }
     const play = $('#btn-play');
     play.textContent = isPlayable(progress, n) ? `Level ${n}` : `🔒 Level ${n}`;
-    play.classList.toggle('hard', isHardLevel(n));
+    play.classList.toggle('hard', hardLevel(n));
   }
 
   // Plays level n when it is open, otherwise shows the map with the reason.
@@ -326,7 +346,7 @@ export function createApp({ root, nosave = false, debug = false, firstLevel = nu
         const b = document.createElement('button');
         b.type = 'button';
         b.className = 'lvl';
-        if (isHardLevel(n)) b.classList.add('hard');
+        if (hardLevel(n)) b.classList.add('hard');
         const reached = n <= progress.level;
         if (!reached || !open) b.classList.add('locked');
         if (n === progress.level) {
@@ -452,7 +472,7 @@ export function createApp({ root, nosave = false, debug = false, firstLevel = nu
     closeOverlay('#stuck');
     closeOverlay('#starve');
     levelNo = n;
-    def = custom || getLevel(n);
+    def = custom || loadLevel(n);
     const restored = resume && !custom ? restoreLevel(n, def) : null;
     game = restored ? restored.game : new Game(def);
     initial = new Game(game.L).snapshot();
@@ -466,7 +486,7 @@ export function createApp({ root, nosave = false, debug = false, firstLevel = nu
     shownStars = starsFor(game.moves, def.par);
     $('#level-num').textContent = String(n);
     $('#level-name').setAttribute('aria-label', `Level ${n}`);
-    $('#hard-badge').hidden = !isHardLevel(n);
+    $('#hard-badge').hidden = !hardLevel(n);
     setScreen('game');
     scene.intro(now());
     hideTip();
@@ -567,7 +587,7 @@ export function createApp({ root, nosave = false, debug = false, firstLevel = nu
     won = true;
     hideTip();
     scene.setHint(null);
-    const hard = isHardLevel(levelNo);
+    const hard = hardLevel(levelNo);
     const moves = game.moves;
     const stars = starsFor(moves, def.par);
     const result = completeLevel(progress, levelNo, hard, stars);
