@@ -18,19 +18,20 @@ import { KEYS, loadJSON, saveJSON, removeKey, requestPersistence } from '../plat
 import { initServiceWorker } from '../platform/pwa.js';
 
 const VERSION = '3.0';
-// Interim until the harder pack lands: the hardest existing levels come right after the tutorials and
-// gates are switched off. Remove when level-data.js is regenerated.
+// Interim until the harder pack lands: after the tutorials only the hardest existing levels, easiest first;
+// past them come generated endless levels (harder still). Gates are switched off. Remove when level-data.js
+// is regenerated.
 let interimOrder = null;
 function packIndex(n) {
-  if (n <= 3 || n > LEVEL_COUNT) return n;
+  if (n <= 3) return n;
   if (!interimOrder) {
     const rest = [];
     for (let i = 4; i <= LEVEL_COUNT; i++) rest.push({ i, d: Number((getLevel(i).stats || {}).difficulty) || 0 });
     rest.sort((a, b) => a.d - b.d || a.i - b.i);
-    const cut = Math.floor(rest.length * 0.35);
-    interimOrder = rest.slice(cut).concat(rest.slice(0, cut)).map((r) => r.i);
+    interimOrder = rest.slice(Math.floor(rest.length * 0.35)).map((r) => r.i);
   }
-  return interimOrder[n - 4];
+  const k = n - 4;
+  return k < interimOrder.length ? interimOrder[k] : LEVEL_COUNT + 1 + (k - interimOrder.length);
 }
 function loadLevel(n) {
   const d = getLevel(packIndex(n));
