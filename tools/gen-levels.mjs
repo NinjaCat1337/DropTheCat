@@ -70,7 +70,7 @@ function parseArgs(argv) {
   return out;
 }
 
-function makeLevel(n) {
+function makeLevel(n, done = []) {
   if (n <= TUTORIALS.length) {
     const t = TUTORIALS[n - 1];
     const def = { id: n, w: t.w, h: t.h, grid: t.grid, cats: t.cats, holes: t.holes, par: t.solution.length, solution: t.solution };
@@ -86,7 +86,22 @@ function makeLevel(n) {
     };
     return def;
   }
-  return generateLevel(levelParams(n), levelSeed(n));
+  const P = levelParams(n);
+  // A hard level must stand out from the nine levels before it (when they were made in this run).
+  const before = done.filter((d) => d.id > n - 10 && d.id < n).map((d) => d.stats.difficulty).sort((a, b) => a - b);
+  if (P.hard && before.length === 9) {
+    const lo = Math.max(P.target[0], before[4] + 1.5);
+    P.target = [lo, Math.max(P.target[1], lo + 4)];
+    // Other seeds until it clearly stands out (the hardest one otherwise).
+    let best = null;
+    for (let k = 0; k < 4; k++) {
+      const def = generateLevel(P, (levelSeed(n) + k * 7919) >>> 0);
+      if (!best || def.stats.difficulty > best.stats.difficulty) best = def;
+      if (def.stats.difficulty > before[4] + 1) break;
+    }
+    return best;
+  }
+  return generateLevel(P, levelSeed(n));
 }
 
 function check(def) {
@@ -126,7 +141,7 @@ function main() {
   const t0 = Date.now();
   for (const n of ids) {
     const t1 = Date.now();
-    const def = makeLevel(n);
+    const def = makeLevel(n, levels);
     const ev = check(def);
     const ms = Date.now() - t1;
     levels.push(def);

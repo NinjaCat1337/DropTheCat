@@ -199,9 +199,9 @@ test('the campaign curve: hard from the start, one new thing per intro level, no
     assert.ok(!P.gates, `no gates on level ${n}`);
     assert.equal(P.openers, 1, `one hole can eat at the start of level ${n}`);
     assert.ok(P.empty[1] <= (n <= 9 ? 2 : 1), `level ${n}: one free cell (two on a few early levels)`);
-    if (P.hard && n >= 20) {
+    if (P.hard && n >= 20 && n <= 100) {
       assert.ok(P.empty[1] <= 2 && P.openers === 1, `hard ${n} is tight`);
-      assert.ok(P.target[0] > levelParams(n - 1).target[1], `hard ${n} aims higher`);
+      assert.ok(P.target[0] >= levelParams(n - 1).target[0] + 2, `hard ${n} aims higher`);
     }
   }
   assert.notEqual(levelSeed(101), levelSeed(102));

@@ -78,6 +78,9 @@ export const DEFAULT_PARAMS = Object.freeze({
   axis: 0, // axis-locked holes
   penta: 0, // at least this many pentomino holes (taken from the 5-cell shapes in `shapes`)
   openers: 2, // holes that may swallow what they reach at the start; the others stay walled in until room opens
+  stall: 0, // chance, at each bite, of a forced stall first: every cat a hole reaches gets another colour
+  strictOpen: 0, // share of attempts where only the openers can eat at the start, for sure (else: as a rule)
+  rescore: 8, // best candidates scored again with a quick fewest-drags line
   mosaic: true, // a cat preferably gets a colour no 4-neighbour has
   target: [0, 99], // wanted difficulty() window
   candidates: 6,
@@ -303,6 +306,8 @@ function lazyPlay(P, rng, board, plan) {
   const holeAt = new Int8Array(n).fill(-1);
   const wall = new Uint8Array(n);
   const gateOf = new Int8Array(n).fill(-1);
+  const forbMask = new Uint16Array(n); // bit c set: this cat never gets colour c (a hole would eat too soon)
+  let forbCount = 0;
   let gates = [];
   let crates = [];
   let total = 0;
@@ -464,46 +469,58 @@ function lazyPlay(P, rng, board, plan) {
   };
   let coverOf = [];
   let universal = [];
-  // After hole k swallows eatCells, can the blank cats left still be shared out among the open holes, each
-  // taking exactly what it still needs (all its layers) within the cells it can ever cover? (b-matching)
+  // After hole k swallows eatCells (k = -1: nothing eaten), can the blank cats left still be shared out among
+  // the layers of the open holes, each layer taking exactly what it still needs, within the cells its hole can
+  // ever cover and the colours each cat may still get (forbMask)? (b-matching)
   const allocOk = (k, eatCells) => {
     const eatSet = new Set(eatCells);
-    const caps = H.map((hole) => (hole.open ? hole.need + hole.spec.size * (hole.spec.layers - hole.li - 1) : 0));
-    caps[k] -= eatCells.length;
-    let picky = false;
-    for (let j = 0; j < m; j++) if (caps[j] > 0 && !universal[j]) picky = true;
-    if (!picky) return true; // every hole left can reach every cell
+    const bins = [];
+    let picky = forbCount > 0;
+    for (let j = 0; j < m; j++) {
+      const hole = H[j];
+      if (!hole.open) continue;
+      for (let l = hole.li; l < hole.spec.layers; l++) {
+        let cap = l === hole.li ? hole.need : hole.spec.size;
+        if (j === k && l === hole.li) cap -= eatCells.length;
+        if (cap <= 0) continue;
+        bins.push({ j, bit: 1 << hole.spec.colors[l], cap });
+        if (!universal[j]) picky = true;
+      }
+    }
+    if (!picky) return true; // every hole left can reach every cell and no colour is ruled out anywhere
     const blanks = [];
     for (let i = 0; i < n; i++) if (state[i] === BLANK && !eatSet.has(i)) blanks.push(i);
+    const B = bins.length;
     const owner = new Int16Array(blanks.length).fill(-1);
-    const load = new Int16Array(m);
+    const load = new Int16Array(B);
     let visited;
     const tryCat = (b0) => {
-      for (let j = 0; j < m; j++) {
-        if (caps[j] <= 0 || visited[j] || !coverOf[j][blanks[b0]]) continue;
-        visited[j] = 1;
-        if (load[j] < caps[j]) {
-          owner[b0] = j;
-          load[j]++;
+      const cell = blanks[b0];
+      for (let t = 0; t < B; t++) {
+        if (visited[t] || !coverOf[bins[t].j][cell] || forbMask[cell] & bins[t].bit) continue;
+        visited[t] = 1;
+        if (load[t] < bins[t].cap) {
+          owner[b0] = t;
+          load[t]++;
           return true;
         }
         for (let b2 = 0; b2 < blanks.length; b2++) {
-          if (owner[b2] !== j) continue;
+          if (owner[b2] !== t) continue;
           owner[b2] = -1;
-          load[j]--;
+          load[t]--;
           if (tryCat(b2)) {
-            owner[b0] = j;
-            load[j]++;
+            owner[b0] = t;
+            load[t]++;
             return true;
           }
-          owner[b2] = j;
-          load[j]++;
+          owner[b2] = t;
+          load[t]++;
         }
       }
       return false;
     };
     for (let b0 = 0; b0 < blanks.length; b0++) {
-      visited = new Uint8Array(m);
+      visited = new Uint8Array(B);
       if (!tryCat(b0)) return false;
     }
     return true;
@@ -518,26 +535,58 @@ function lazyPlay(P, rng, board, plan) {
       for (let i = 0; i < n; i++) if (floor[i] && !cov[i]) return false;
       return true;
     });
-    if (allocOk(0, [])) laid = true;
+    if (allocOk(-1, [])) laid = true;
     else why = 'lz:alloc0';
   }
   if (!laid) return reject(P, why);
-  // A few openers may swallow what they reach at the start; every other hole must not (it stays walled in by
-  // other colours until room opens up around it), unless nothing else can happen.
-  const openerSet = new Set(rng.shuffle(H.map((_, k) => k)).slice(0, Math.max(1, Math.min(m, P.openers || 2))));
+  // Exactly P.openers holes may swallow what they reach at the start; every other hole is walled in by other
+  // colours at first: the cats it reaches at the start never get its first colour.
   const keyAt = P.lock > 0 ? Math.floor(total * (0.25 + 0.35 * rng.next())) : -1;
   let key = -1;
   let eaten = 0;
   let unstalls = 0;
+  let stalls = 0;
   const steps = [];
-  // Cats each hole could reach right at the start: a non-opener never gets those in its colour, so at the start
-  // it is walled in by other colours.
-  const reach0 = H.map((_, k) => {
+  const colourOf = (k) => H[k].spec.colors[H[k].li];
+  const forbidden = (k, cells) => {
+    const bit = 1 << colourOf(k);
+    for (const i of cells) if (forbMask[i] & bit) return true;
+    return false;
+  };
+  const forbid = (c, cells) => {
+    for (const i of cells) forbMask[i] |= 1 << c;
+    forbCount++;
+  };
+  // Blank cats hole k could swallow right now (from wherever it can slide to over empty cells).
+  const reachable = (k) => {
     const s = scan(k);
     const cells = new Set();
     for (const q of s.targets) for (const o of H[k].offs) if (state[q + o] === BLANK) cells.add(q + o);
     return cells;
-  });
+  };
+  const reach0 = H.map((_, k) => reachable(k));
+  const want = Math.max(1, Math.min(m, P.openers || 1));
+  // Strict attempts rule it out for good (the cats a non-opener reaches at the start never get its first
+  // colour); the others only avoid it (such "early" bites are a last resort).
+  const strict = rng.chance(P.strictOpen ?? 1);
+  let openerSet = null;
+  for (const first of rng.shuffle(H.map((_, k) => k))) {
+    if (!reach0[first].size) continue; // an opener must be able to eat at the start
+    const set = new Set([first, ...rng.shuffle(H.map((_, k) => k).filter((k) => k !== first)).slice(0, want - 1)]);
+    if (!strict) {
+      openerSet = set;
+      break;
+    }
+    forbMask.fill(0);
+    forbCount = 0;
+    for (let k = 0; k < m; k++) if (!set.has(k)) forbid(H[k].spec.colors[0], reach0[k]);
+    if (allocOk(-1, [])) {
+      openerSet = set;
+      break;
+    }
+  }
+  if (!openerSet) return reject(P, strict ? 'lz:open' : 'lz:open0');
+  const early = (k, cells) => !strict && !openerSet.has(k) && H[k].li === 0 && cells.some((i) => reach0[k].has(i));
   const moveTo = (k, path) => {
     const hole = H[k];
     for (const ch of path) {
@@ -549,7 +598,40 @@ function lazyPlay(P, rng, board, plan) {
       steps.push([k, ch]);
     }
   };
-  for (let guard = 0; guard < 4 * total + 50; guard++) {
+  // Snapshots taken before forced stalls: when the play gets stuck later, it goes back to the last one and
+  // carries on without that stall.
+  const snap = () => ({
+    state: state.slice(),
+    final: final.slice(),
+    holeAt: holeAt.slice(),
+    wall: wall.slice(),
+    forbMask: forbMask.slice(),
+    forbCount,
+    holes: H.map((hole) => [hole.x, hole.y, hole.li, hole.need, hole.open]),
+    steps: steps.length,
+    eaten,
+    key,
+    unstalls,
+    stalls,
+  });
+  const restore = (cp) => {
+    state.set(cp.state);
+    final.set(cp.final);
+    holeAt.set(cp.holeAt);
+    wall.set(cp.wall);
+    forbMask.set(cp.forbMask);
+    forbCount = cp.forbCount;
+    cp.holes.forEach(([x, y, li, need, open], k) => Object.assign(H[k], { x, y, li, need, open }));
+    steps.length = cp.steps;
+    eaten = cp.eaten;
+    key = cp.key;
+    unstalls = cp.unstalls;
+    stalls = cp.stalls;
+  };
+  const checkpoints = [];
+  let restores = 0;
+  let stallBan = 0; // no forced stall before this many cats are eaten (after going back)
+  for (let guard = 0; guard < 12 * total + 100; guard++) {
     if (!H.some((hole) => hole.open)) break;
     const options = [];
     for (let k = 0; k < m; k++) {
@@ -560,23 +642,37 @@ function lazyPlay(P, rng, board, plan) {
       for (const q of s.targets) {
         const path = s.path(q);
         const cells = hole.offs.map((o) => q + o).filter((i) => state[i] === BLANK);
+        if (forbidden(k, cells)) continue;
         let bad = 0;
         for (const i of cells) bad += sameAround(i, c);
         bad += cells.length - 1; // cats swallowed together sit next to each other
-        // A cat it could reach at the start, in its first colour, frees a hole at once: only openers do that.
-        let early = 0;
-        if (!openerSet.has(k) && hole.li === 0) for (const i of cells) if (reach0[k].has(i)) early++;
         if (!allocOk(k, cells)) continue;
         // Big holes eat first; small, nimble ones are kept for the awkward last cats.
         const score = 2 + 0.5 * Math.min(path.length - 1, 4) + 0.3 * hole.spec.size + (hole.need === cells.length ? 0.5 : 0) + rng.next() * 2;
-        // Tiers: clean moves first; then mosaic breaks; then ones that free a hole at the start.
-        const tier = early ? 2 + (bad && P.mosaic ? 1 : 0) : bad && P.mosaic ? 1 : 0;
-        options.push({ k, q, path, cells, score, bad, early, tier });
+        // Tiers: clean moves first; then mosaic breaks; then bites a non-opener could take at the start.
+        const tier = early(k, cells) ? 2 + (bad && P.mosaic ? 1 : 0) : bad && P.mosaic ? 1 : 0;
+        options.push({ k, q, path, cells, score, bad, tier });
       }
+    }
+    // A forced stall: every cat any hole reaches now gets another colour than that hole's, so before the next
+    // bite the holes have to step aside for each other (an ordered chain of slides, found by lazyUnstall).
+    if (options.length && eaten > 0 && eaten >= stallBan && P.stall > 0 && rng.chance(P.stall)) {
+      const cp = snap();
+      for (let k = 0; k < m; k++) if (H[k].open) forbid(colourOf(k), reachable(k));
+      const seq = allocOk(-1, []) ? lazyUnstall(true) || lazyUnstall(false) : null;
+      if (seq && seq.length) {
+        checkpoints.push(cp);
+        if (checkpoints.length > 6) checkpoints.shift();
+        stalls++;
+        for (const [k, ch] of seq) moveTo(k, ch);
+        continue;
+      }
+      forbMask.set(cp.forbMask);
+      forbCount = cp.forbCount;
     }
     const best = options.length ? Math.min(...options.map((o) => o.tier)) : 9;
     if (best > 0 && unstalls < 3 * m) {
-      // Only compromising moves: let holes step aside first if that opens a clean one.
+      // Only mosaic-breaking moves: let holes step aside first if that opens a clean one.
       const seq = lazyUnstall(true);
       if (seq && seq.length) {
         unstalls++;
@@ -587,6 +683,12 @@ function lazyPlay(P, rng, board, plan) {
     if (!options.length) {
       // Nobody can eat: let holes step aside (joint BFS).
       const seq = lazyUnstall(false);
+      if ((!seq || !seq.length) && checkpoints.length && restores < 12) {
+        restore(checkpoints.pop());
+        restores++;
+        stallBan = eaten + 2;
+        continue;
+      }
       if (!seq || !seq.length) return reject(P, `lz:stuck@${Math.round((10 * eaten) / total)}`);
       for (const [k, ch] of seq) moveTo(k, ch);
       continue;
@@ -635,11 +737,12 @@ function lazyPlay(P, rng, board, plan) {
     key,
     crates,
     gates: gates.map((i) => [i % w, (i - (i % w)) / w, gateOf[i]]),
+    stalls,
   };
 
   /**
-   * Joint BFS over hole positions (slides over empty cells) until some hole can swallow a blank cat (clean:
-   * without breaking the mosaic or freeing a non-opener at the start).
+   * Joint BFS over hole positions (slides over empty cells) until some hole can swallow blank cats that may
+   * still take its colour (clean: a single cat, without breaking the mosaic).
    */
   function lazyUnstall(clean) {
     const A = [];
@@ -676,16 +779,10 @@ function lazyPlay(P, rng, board, plan) {
           }
           if (!ok || blanks > hole.need) continue;
           if (blanks) {
-            if (clean) {
-              const c = hole.spec.colors[hole.li];
-              let dirty = blanks > 1;
-              for (const o of hole.offs) {
-                const i = q + o;
-                if (state[i] !== BLANK) continue;
-                if (sameAround(i, c) || (!openerSet.has(A[a]) && hole.li === 0 && reach0[A[a]].has(i))) dirty = true;
-              }
-              if (dirty) continue;
-            }
+            const cells = [];
+            for (const o of hole.offs) if (state[q + o] === BLANK) cells.push(q + o);
+            if (forbidden(A[a], cells)) continue;
+            if (clean && (blanks > 1 || early(A[a], cells) || cells.some((i) => sameAround(i, hole.spec.colors[hole.li])))) continue;
             const out = [];
             for (let key = keyOf(cfg); seen.get(key); ) {
               const st = seen.get(key);
@@ -1104,6 +1201,16 @@ export function generateLevel(params = {}, seed = 1) {
   const rng = createRng((seed >>> 0) ^ 0x9e3779b9);
   let best = null;
   let found = 0;
+  const pool = [];
+  // Lower is better: distance to the wanted difficulty window, no mosaic, more than one hole able to eat at
+  // the start, too little pure shuffling.
+  const rate = (st, d, def) => {
+    const [lo, hi] = P.target;
+    const extraStart = 3 * Math.max(0, st.startHoles - (P.openers || 1));
+    const shortShuffle = Math.max(0, (P.minShuffle || 0) - st.shuffle);
+    // (harder than the window only counts a little, except on intro levels: the user wants it hard)
+    return (d < lo ? (P.hard ? 3 : 1) * (lo - d) : d > hi ? (P.intro ? 1 : P.hard ? 0.1 : 0.5) * (d - hi) : 0) + P.mosaicWeight * mosaic(def) + extraStart + 40 * shortShuffle + rng.next() * 0.01;
+  };
   for (let attempt = 0; attempt < P.attempts && found < P.candidates; attempt++) {
     const sub = (rng.next() * 0x100000000) >>> 0;
     const cand = buildCandidate(P, sub);
@@ -1129,15 +1236,26 @@ export function generateLevel(params = {}, seed = 1) {
     st.fiddle = rs.median;
     st.shuffle = shuffleShare(cand.def, merged);
     const d = difficulty(st);
-    const [lo, hi] = P.target;
-    // Also wanted: exactly one hole able to eat at the start, and a good share of pure shuffling drags.
-    const extraStart = P.intro ? 0 : Math.max(0, st.startHoles - (P.openers || 1));
-    const shortShuffle = Math.max(0, (P.minShuffle || 0) - st.shuffle);
-    const score = (d < lo ? lo - d : d > hi ? d - hi : 0) + P.mosaicWeight * mosaic(cand.def) + extraStart + 4 * shortShuffle + rng.next() * 0.01;
+    const score = rate(st, d, cand.def);
     if (P._debug) (P._debug.cands || (P._debug.cands = [])).push({ ...st, d, mosaic: mosaic(cand.def) });
-    if (!best || score < best.score) best = { def: cand.def, lines: [cand.solution, solverLine], st, d, score };
+    pool.push({ def: cand.def, lines: [cand.solution, solverLine], st, d, score });
   }
-  if (!best) throw new Error(`generator: no level found (${JSON.stringify(P._debug || {})})`);
+  if (!pool.length) throw new Error(`generator: no level found (${JSON.stringify(P._debug || {})})`);
+  // The best few again, with the shuffling share of a quick fewest-drags line (closer to the par line).
+  // (the best-rated ones and the hardest ones: much shuffling comes with a high difficulty).
+  const half = Math.ceil(P.rescore / 2);
+  const byScore = pool.slice().sort((a, b) => a.score - b.score).slice(0, half);
+  const byHard = pool.slice().sort((a, b) => b.d - a.d).slice(0, half);
+  for (const c of new Set([...byScore, ...byHard])) {
+    const quick = minDrags(new Game(c.def), { beam: 16 });
+    if (!quick) continue;
+    c.st = { ...c.st, shuffle: shuffleShare(c.def, quick.moves.map((mv) => [mv.hole, mv.path])) };
+    c.d = difficulty(c.st);
+    if (P._debug) (P._debug.resc || (P._debug.resc = [])).push([c.st.shuffle, quick.moves.length, c.st.startHoles, Math.round(c.d * 10) / 10]);
+    c.score = rate(c.st, c.d, c.def);
+    if (!best || c.score < best.score) best = c;
+  }
+  if (!best) best = pool.slice().sort((a, b) => a.score - b.score)[0];
   const def = best.def;
   // Par: the fewest drags found (beam search over whole drags, or the construction / solver line if shorter).
   const lines = best.lines.map((line) => mergeMoves(line));
@@ -1278,8 +1396,8 @@ export function levelParams(n) {
   const P = {
     id: n,
     hard,
-    candidates: endless ? 4 : hard ? 120 : 60,
-    attempts: endless ? 300 : 1000,
+    candidates: endless ? 2 : hard ? 120 : 60,
+    attempts: endless ? 300 : hard ? 1600 : 1000,
     playouts: endless ? 6 : 20,
     fiddles: endless ? 6 : 16,
     parBeam: endless ? 8 : 96,
@@ -1339,7 +1457,10 @@ export function levelParams(n) {
   else if (after('lock') && r.chance(0.25)) P.lock = 2;
   // Exactly one hole can eat at the start; a good share of the solution is pure shuffling.
   P.openers = 1;
-  P.minShuffle = intro ? 0.2 : hard ? 0.45 : 0.35;
+  P.stall = intro ? 0.4 : endless ? 0.5 : hard ? 0.9 : 0.8;
+  P.strictOpen = endless ? 0.3 : 0.7;
+  P.minShuffle = intro ? 0.25 : hard ? 0.5 : 0.4;
+  P.rescore = endless ? 0 : hard ? 40 : 24;
   if (intro) {
     // The new thing is the point: nothing else new on the level (the earlier constraints step back too).
     const keep = { walls: ['fence'], axis: ['axis'], ice: ['ice'], box: ['box'], hungry: ['hungry', 'hungrySlack'], lock: ['lock'] }[intro] || [];
@@ -1348,7 +1469,7 @@ export function levelParams(n) {
   P.intro = intro;
   const base = endless ? targetDifficulty(100) - 0.5 + r.next() : targetDifficulty(n);
   if (intro) P.target = [base - 2.5, base - 1];
-  else if (hard) P.target = [base + 2, base + 5];
-  else P.target = [base - 0.4, base + 0.4];
+  else if (hard) P.target = [base + 2, base + 6];
+  else P.target = [base - 0.5, base + 2.5];
   return P;
 }
