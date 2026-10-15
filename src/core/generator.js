@@ -17,21 +17,37 @@
 // a few "opener" holes start, the others stay walled in by other colours until room opens up around them; cats
 // get colours their 4-neighbours do not have (the mosaic); the cats left must always remain shareable among the
 // open holes (b-matching on what each shape can ever cover), so the play does not jam at the end.
-// Ice, boxes and crates + key are added where the solution allows them. Every candidate is solved by the hint
-// solver; its difficulty is measured by playing it (see playStats) and the candidate closest to the wanted
-// difficulty wins. levelParams(n) holds the campaign curve.
+// Ice, boxes and crates + key are added where the solution allows them. Later boards get narrow passages (wall
+// lines with 1-2 cell gaps), coloured gates on the chokepoints (only the hole of that colour, always a
+// single-layer one, may cover a gate; the colouring plays with that rule) and pentomino holes. Every candidate
+// is solved by the hint solver; its difficulty is measured by playing it (see playStats) and the candidate
+// closest to the wanted difficulty wins. The par is the fewest drags found (a beam search over whole drags,
+// see solver.minDrags, against the construction and solver lines); the stored solution is exactly par drags.
+// Hungry cats get a deadline: the drag of that line which eats them plus some slack. levelParams(n) holds the
+// campaign curve.
 import { compileLevel, Game, DIRS, MAX_COLORS } from './rules.js';
 import { SHAPES, orientations } from './shapes.js';
 import { createRng } from './rng.js';
-import { solve, explorer, applyPath, replay, mergeMoves } from './solver.js';
+import { solve, explorer, applyPath, replay, mergeMoves, minDrags } from './solver.js';
 
 const DX = DIRS.map((d) => d[0]);
 const DY = DIRS.map((d) => d[1]);
 const DCH = DIRS.map(([dx, dy]) => (dx > 0 ? 'R' : dx < 0 ? 'L' : dy > 0 ? 'D' : 'U'));
 const OPP = { R: 'L', L: 'R', U: 'D', D: 'U' };
 
-const ORIENTS = Object.fromEntries(Object.entries(SHAPES).map(([name, cells]) => [name, orientations(cells)]));
-const SIZE = Object.fromEntries(Object.entries(SHAPES).map(([name, cells]) => [name, cells.length]));
+/** Readable pentominoes for the big holes of later levels (5 cells: need 5 per layer). */
+const PENTOMINOES = {
+  I5: [[0, 0], [1, 0], [2, 0], [3, 0], [4, 0]],
+  L5: [[0, 0], [0, 1], [0, 2], [0, 3], [1, 3]],
+  P5: [[0, 0], [1, 0], [0, 1], [1, 1], [0, 2]],
+  U5: [[0, 0], [2, 0], [0, 1], [1, 1], [2, 1]],
+  T5: [[0, 0], [1, 0], [2, 0], [1, 1], [1, 2]],
+  Z5: [[0, 0], [1, 0], [1, 1], [1, 2], [2, 2]],
+  V5: [[0, 0], [0, 1], [0, 2], [1, 2], [2, 2]],
+};
+const ALL_SHAPES = { ...SHAPES, ...PENTOMINOES };
+const ORIENTS = Object.fromEntries(Object.entries(ALL_SHAPES).map(([name, cells]) => [name, orientations(cells)]));
+const SIZE = Object.fromEntries(Object.entries(ALL_SHAPES).map(([name, cells]) => [name, cells.length]));
 const MAX_W = 7;
 const MAX_H = 10;
 /** Colours in the order new ones are taken (0 red, 1 orange, 2 yellow, 3 lime, 4 cyan, 5 blue, 6 purple,
@@ -53,7 +69,14 @@ export const DEFAULT_PARAMS = Object.freeze({
   ice: 0,
   box: 0,
   lock: 0, // crate cells (with one key cat)
+  gates: 0, // coloured gates (on narrow passages when the board has some)
+  fence: false, // a wall line across the board with 1-cell gaps
+  split: false, // a wall column down the board with 1-cell gaps
+  hungry: 0, // hungry cats (deadline = the par drag that eats it + hungrySlack)
+  hungrySlack: 2,
+  parBeam: 64, // beam width of the par search
   axis: 0, // axis-locked holes
+  penta: 0, // at least this many pentomino holes (taken from the 5-cell shapes in `shapes`)
   openers: 2, // holes that may swallow what they reach at the start; the others stay walled in until room opens
   mosaic: true, // a cat preferably gets a colour no 4-neighbour has
   target: [0, 99], // wanted difficulty() window
@@ -86,10 +109,59 @@ function makeBoard(P, rng) {
   } else if (style === 'notch' && w % 2 === 1) {
     g[rng.chance(0.5) ? 0 : h - 1][(w - 1) / 2] = '_';
   }
+  // Narrow passages: a wall line across the board with a 1-cell gap (only thin shapes get through it) and a
+  // 2-cell gap further along (medium shapes); the 1-cell gaps are where gates go.
+  const gaps = [];
+  const line = (len, setCell, openCell) => {
+    for (let t = 0; t < len; t++) setCell(t);
+    const narrow = rng.range(0, len - 1);
+    openCell(narrow);
+    gaps.push(narrow);
+    const wide = [];
+    for (let t = 0; t + 1 < len; t++) if (Math.abs(t - narrow) > 2 && Math.abs(t + 1 - narrow) > 2) wide.push(t);
+    if (wide.length) {
+      const t = rng.pick(wide);
+      openCell(t);
+      openCell(t + 1);
+    }
+  };
+  if (P.fence) {
+    const y = rng.range(2, h - 3);
+    const cells = [];
+    line(
+      w,
+      (x) => {
+        if (g[y][x] === '.') g[y][x] = '#';
+      },
+      (x) => {
+        g[y][x] = '.';
+        cells.push(y * w + x);
+      },
+    );
+    gaps.splice(gaps.length - 1, 1, cells[0]);
+  }
+  if (P.split && w >= 6) {
+    const x = rng.chance(0.5) ? Math.floor((w - 1) / 2) : Math.ceil((w - 1) / 2);
+    const cells = [];
+    line(
+      h,
+      (y) => {
+        if (g[y][x] === '.') g[y][x] = '#';
+      },
+      (y) => {
+        g[y][x] = '.';
+        cells.push(y * w + x);
+      },
+    );
+    gaps.splice(gaps.length - 1, 1, cells[0]);
+  }
   for (let i = 0, tries = 0; i < P.walls && tries < 40; tries++) {
     const x = rng.range(1, Math.max(1, Math.floor((w - 1) / 2)));
     const y = rng.range(1, h - 2);
     if (g[y][x] !== '.' || g[y][w - 1 - x] !== '.') continue;
+    let near = false;
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) if (g[y + dy] && g[y + dy][x + dx] === '#') near = true;
+    if (near) continue;
     both(x, y, '#');
     i++;
   }
@@ -126,7 +198,7 @@ function makeBoard(P, rng) {
     }
   }
   if (reach !== count) return null;
-  return { w, h, n, rows, floor, floorCount: count, style };
+  return { w, h, n, rows, floor, floorCount: count, style, gaps: gaps.filter((i) => floor[i]) };
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -147,11 +219,21 @@ function pickShape(rng, weights, size) {
 }
 
 function makePlan(P, rng, board) {
-  const room = board.floorCount - P.lock;
+  const room = board.floorCount - P.lock - P.gates;
   const m = P.holes;
+  const maxSize = Math.max(...Object.keys(P.shapes).map((name) => SIZE[name] || 0));
+  const big = Object.keys(P.shapes).filter((name) => SIZE[name] === 5);
   for (let attempt = 0; attempt < 60; attempt++) {
     const holes = [];
     for (let k = 0; k < m; k++) holes.push({ name: pickShape(rng, P.shapes), layers: 1, axis: null });
+    // At least P.penta pentomino holes (their intro level); those keep their shape.
+    const forced = new Set();
+    if (P.penta > 0 && big.length) {
+      for (const k of rng.shuffle(holes.map((_, j) => j)).slice(0, Math.min(m, P.penta))) {
+        holes[k].name = rng.pick(big);
+        forced.add(k);
+      }
+    }
     const order = rng.shuffle(holes.map((_, k) => k));
     for (let i = 0; i < Math.min(P.layered, m); i++) holes[order[i]].layers = rng.chance(P.layers3) ? 3 : 2;
     const total = () => holes.reduce((a, hole) => a + (1 + hole.layers) * SIZE[hole.name], 0);
@@ -160,12 +242,16 @@ function makePlan(P, rng, board) {
     // Grow or shrink shapes until the cells add up.
     for (let fix = 0; fix < 40 && (total() < lo || total() > hi); fix++) {
       const k = rng.int(m);
+      if (forced.has(k)) continue;
       const s = SIZE[holes[k].name];
       const want = total() < lo ? s + 1 : s - 1;
-      const name = pickShape(rng, P.shapes, want) || (want >= 1 && want <= 4 ? pickShape(rng, { I1: 1, I2: 1, I3: 1, I4: 1 }, want) : null);
+      const name = pickShape(rng, P.shapes, want) || (want >= 1 && want <= maxSize ? pickShape(rng, { I1: 1, I2: 1, I3: 1, I4: 1, I5: 1 }, want) : null);
       if (name) holes[k].name = name;
     }
     if (total() < lo || total() > hi) continue;
+    if (holes.filter((hole) => SIZE[hole.name] === 5).length < Math.min(m, P.penta || 0)) continue;
+    // Walls leave awkward cells: keep a couple of small holes that can get everywhere.
+    if ((P.fence || P.split || P.walls) && holes.filter((hole) => SIZE[hole.name] <= 3).length < Math.min(2, m)) continue;
     const colours = holes.reduce((a, hole) => a + hole.layers, 0);
     if (colours > Math.min(MAX_COLORS, P.maxColors || MAX_COLORS)) continue;
     // Colours: all different (layers too).
@@ -196,21 +282,6 @@ function makePlan(P, rng, board) {
 // Lazy colouring
 // ---------------------------------------------------------------------------------------------------------
 
-/**
- * Builds a level by playing it FORWARDS on a board whose cats have no colour yet ("lazy colouring"). The holes
- * and a few empty cells are placed first; every other floor cell holds a blank cat. A hole may swallow any blank
- * cat its current layer still has room for: the cat takes the hole's colour for good (a layer full: the hole
- * turns its next colour; the last one full: it closes and leaves). The recorded play is a solution of the
- * coloured level, and since space only grows, the walk rarely gets stuck. The move policy makes the puzzle: only
- * a few "opener" holes may take what they reach at the start; the others must first travel through the room the
- * others made (so at the start they are walled in by other colours); a cat preferably gets a colour no
- * 4-neighbour has (the mosaic); longer trips are preferred (cats spread out); big holes eat first and small,
- * nimble ones are kept for the awkward last cats; a move that would leave cats no open hole can share out
- * (b-matching on the cells each shape can ever cover) is never made. Moves are picked in tiers: clean ones,
- * then mosaic breaks, then ones that free a walled-in hole at the start; when only compromises are left, holes
- * first try to step aside (joint BFS) to open a clean one.
- * Returns { color (per cell, -1 none), holes (start positions), solution, key, crates } or null.
- */
 function lazyPlay(P, rng, board, plan) {
   const { w, h, n, floor } = board;
   const BLANK = -2;
@@ -228,40 +299,85 @@ function lazyPlay(P, rng, board, plan) {
   const final = new Int8Array(n).fill(-1); // colour each cat ends up with
   const holeAt = new Int8Array(n).fill(-1);
   const wall = new Uint8Array(n);
-  for (let i = 0; i < n; i++) wall[i] = floor[i] ? 0 : 1;
-  // Holes first (random spots), then crates, empty cells; blank cats everywhere else.
-  for (const k of rng.shuffle(H.map((_, k) => k))) {
-    const hole = H[k];
-    const spots = [];
-    for (let y = 0; y + hole.bh <= h; y++) {
-      for (let x = 0; x + hole.bw <= w; x++) {
-        const p = y * w + x;
-        if (hole.offs.every((o) => !wall[p + o] && holeAt[p + o] === -1)) spots.push(p);
+  const gateOf = new Int8Array(n).fill(-1);
+  let gates = [];
+  let crates = [];
+  let total = 0;
+  // passable(k, i): no wall/crate, and no gate of another colour than hole k's current one.
+  const passable = (k, i) => !wall[i] && (gateOf[i] === -1 || gateOf[i] === H[k].spec.colors[H[k].li]);
+  /**
+   * One random layout: holes (bulkiest first), coloured gates on chokepoints (the gaps of narrow passages,
+   * then corridor cells: only the hole of that colour, always a single-layer one, may cover them; cats never
+   * stand on them), crates, the empty cells; blank cats everywhere else. Returns a reason when it fails.
+   */
+  const layout = () => {
+    state.fill(-1);
+    holeAt.fill(-1);
+    gateOf.fill(-1);
+    for (let i = 0; i < n; i++) wall[i] = floor[i] ? 0 : 1;
+    gates = [];
+    const order = rng.shuffle(H.map((_, k) => k)).sort((x, y) => H[y].offs.length - H[x].offs.length || x - y);
+    for (const k of order) {
+      const hole = H[k];
+      const spots = [];
+      for (let y = 0; y + hole.bh <= h; y++) {
+        for (let x = 0; x + hole.bw <= w; x++) {
+          const p = y * w + x;
+          if (hole.offs.every((o) => !wall[p + o] && holeAt[p + o] === -1)) spots.push(p);
+        }
       }
+      if (!spots.length) return 'lz:spots';
+      const p = rng.pick(spots);
+      hole.x = hole.x0 = p % w;
+      hole.y = hole.y0 = (p - hole.x) / w;
+      for (const o of hole.offs) holeAt[p + o] = k;
     }
-    if (!spots.length) return reject(P, 'lz:spots');
-    const p = rng.pick(spots);
-    hole.x = hole.x0 = p % w;
-    hole.y = hole.y0 = (p - hole.x) / w;
-    for (const o of hole.offs) holeAt[p + o] = k;
-  }
-  const rest = [];
-  for (let i = 0; i < n; i++) if (!wall[i] && holeAt[i] === -1) rest.push(i);
-  rng.shuffle(rest);
-  const crates = rest.splice(0, P.lock);
-  for (const i of crates) wall[i] = 1;
-  rest.splice(0, plan.empty); // these stay empty
-  for (const i of rest) state[i] = BLANK;
-  const total = rest.length;
-  if (total !== H.reduce((a, hole) => a + hole.spec.size * hole.spec.layers, 0)) return reject(P, 'lz:count');
-  // A few openers may swallow what they reach at the start; every other hole must not (it stays walled in by
-  // other colours until room opens up around it), unless nothing else can happen.
-  const openerSet = new Set(rng.shuffle(H.map((_, k) => k)).slice(0, Math.max(1, Math.min(m, P.openers || 2))));
-  const keyAt = P.lock > 0 ? Math.floor(total * (0.25 + 0.35 * rng.next())) : -1;
-  let key = -1;
-  let eaten = 0;
-  let unstalls = 0;
-  const steps = [];
+    if (P.gates > 0) {
+      const single = H.map((_, k) => k).filter((k) => H[k].spec.layers === 1);
+      if (!single.length) return 'lz:gateHole';
+      const free0 = (i) => floor[i] && holeAt[i] === -1;
+      const corridor = [];
+      for (let i = 0; i < n; i++) {
+        if (!free0(i) || board.gaps.includes(i)) continue;
+        const x = i % w;
+        const y = (i - x) / w;
+        let nb = 0;
+        for (let d = 0; d < 4; d++) {
+          const nx = x + DX[d];
+          const ny = y + DY[d];
+          if (nx >= 0 && ny >= 0 && nx < w && ny < h && floor[ny * w + nx]) nb++;
+        }
+        if (nb <= 2) corridor.push(i);
+      }
+      const pool = rng.shuffle(board.gaps.filter(free0)).concat(rng.shuffle(corridor));
+      for (const i of pool) {
+        if (gates.length >= P.gates) break;
+        if (gates.some((j) => Math.abs((j % w) - (i % w)) + Math.abs(Math.floor(j / w) - Math.floor(i / w)) <= 1)) continue;
+        gateOf[i] = H[rng.pick(single)].spec.colors[0];
+        gates.push(i);
+      }
+      if (gates.length < P.gates) return 'lz:gates';
+    }
+    // Cells no hole can ever cover must stay empty: they take the empty cells first.
+    coverOf = H.map(coverFor);
+    const coverable = new Uint8Array(n);
+    for (const cov of coverOf) for (let i = 0; i < n; i++) if (cov[i]) coverable[i] = 1;
+    const rest = [];
+    const dead = [];
+    for (let i = 0; i < n; i++) {
+      if (wall[i] || holeAt[i] !== -1 || gateOf[i] !== -1) continue;
+      (coverable[i] ? rest : dead).push(i);
+    }
+    if (dead.length > plan.empty) return 'lz:dead';
+    rng.shuffle(rest);
+    crates = rest.splice(0, P.lock);
+    for (const i of crates) wall[i] = 1;
+    rest.splice(0, plan.empty - dead.length); // these stay empty
+    for (const i of rest) state[i] = BLANK;
+    total = rest.length;
+    if (total !== H.reduce((s, hole) => s + hole.spec.size * hole.spec.layers, 0)) return 'lz:count';
+    return null;
+  };
   const sameAround = (i, c) => {
     const x = i % w;
     const y = (i - x) / w;
@@ -297,7 +413,7 @@ function lazyPlay(P, rng, board, plan) {
         let ok = true;
         for (const o of hole.offs) {
           const i = q + o;
-          if (wall[i] || (holeAt[i] !== -1 && holeAt[i] !== k)) {
+          if (!passable(k, i) || (holeAt[i] !== -1 && holeAt[i] !== k)) {
             ok = false;
             break;
           }
@@ -317,19 +433,12 @@ function lazyPlay(P, rng, board, plan) {
     };
     return { region, targets, path };
   };
-  // Cats each hole could reach right at the start: a non-opener never gets those in its colour, so at the start
-  // it is walled in by other colours.
-  const reach0 = H.map((_, k) => {
-    const s = scan(k);
-    const cells = new Set();
-    for (const q of s.targets) for (const o of H[k].offs) if (state[q + o] === BLANK) cells.add(q + o);
-    return cells;
-  });
-  // Cells each hole could ever cover on the board (walls and crates only): the last cats must stay coverable.
-  const coverOf = H.map((hole) => {
+  // Cells each hole could ever cover on the board (walls, other colours' gates; crates open later).
+  const coverFor = (hole) => {
     const cov = new Uint8Array(n);
     const seen = new Uint8Array(n);
     const start = hole.y * w + hole.x;
+    const mine = hole.spec.layers === 1 ? hole.spec.colors[0] : -2;
     const queue = [start];
     seen[start] = 1;
     for (let qi = 0; qi < queue.length; qi++) {
@@ -343,19 +452,17 @@ function lazyPlay(P, rng, board, plan) {
         const ny = py + DY[d];
         if (nx < 0 || ny < 0 || nx + hole.bw > w || ny + hole.bh > h) continue;
         const q = ny * w + nx;
-        if (seen[q] || !hole.offs.every((o) => floor[q + o])) continue;
+        if (seen[q] || !hole.offs.every((o) => floor[q + o] && (gateOf[q + o] === -1 || gateOf[q + o] === mine))) continue;
         seen[q] = 1;
         queue.push(q);
       }
     }
     return cov;
-  });
+  };
+  let coverOf = [];
+  let universal = [];
   // After hole k swallows eatCells, can the blank cats left still be shared out among the open holes, each
   // taking exactly what it still needs (all its layers) within the cells it can ever cover? (b-matching)
-  const universal = coverOf.map((cov) => {
-    for (let i = 0; i < n; i++) if (floor[i] && !cov[i]) return false;
-    return true;
-  });
   const allocOk = (k, eatCells) => {
     const eatSet = new Set(eatCells);
     const caps = H.map((hole) => (hole.open ? hole.need + hole.spec.size * (hole.spec.layers - hole.li - 1) : 0));
@@ -368,12 +475,12 @@ function lazyPlay(P, rng, board, plan) {
     const owner = new Int16Array(blanks.length).fill(-1);
     const load = new Int16Array(m);
     let visited;
-    const tryCat = (b) => {
+    const tryCat = (b0) => {
       for (let j = 0; j < m; j++) {
-        if (caps[j] <= 0 || visited[j] || !coverOf[j][blanks[b]]) continue;
+        if (caps[j] <= 0 || visited[j] || !coverOf[j][blanks[b0]]) continue;
         visited[j] = 1;
         if (load[j] < caps[j]) {
-          owner[b] = j;
+          owner[b0] = j;
           load[j]++;
           return true;
         }
@@ -382,7 +489,7 @@ function lazyPlay(P, rng, board, plan) {
           owner[b2] = -1;
           load[j]--;
           if (tryCat(b2)) {
-            owner[b] = j;
+            owner[b0] = j;
             load[j]++;
             return true;
           }
@@ -392,14 +499,42 @@ function lazyPlay(P, rng, board, plan) {
       }
       return false;
     };
-    // Picky holes first: they have the fewest choices.
-    const order2 = blanks.map((_, b) => b);
-    for (const b of order2) {
+    for (let b0 = 0; b0 < blanks.length; b0++) {
       visited = new Uint8Array(m);
-      if (!tryCat(b)) return false;
+      if (!tryCat(b0)) return false;
     }
     return true;
   };
+  // Lay the board out until the cats can be shared out among the holes from the start.
+  let why = 'lz:layout';
+  let laid = false;
+  for (let attempt = 0; attempt < 40 && !laid; attempt++) {
+    why = layout();
+    if (why) continue;
+    universal = coverOf.map((cov) => {
+      for (let i = 0; i < n; i++) if (floor[i] && !cov[i]) return false;
+      return true;
+    });
+    if (allocOk(0, [])) laid = true;
+    else why = 'lz:alloc0';
+  }
+  if (!laid) return reject(P, why);
+  // A few openers may swallow what they reach at the start; every other hole must not (it stays walled in by
+  // other colours until room opens up around it), unless nothing else can happen.
+  const openerSet = new Set(rng.shuffle(H.map((_, k) => k)).slice(0, Math.max(1, Math.min(m, P.openers || 2))));
+  const keyAt = P.lock > 0 ? Math.floor(total * (0.25 + 0.35 * rng.next())) : -1;
+  let key = -1;
+  let eaten = 0;
+  let unstalls = 0;
+  const steps = [];
+  // Cats each hole could reach right at the start: a non-opener never gets those in its colour, so at the start
+  // it is walled in by other colours.
+  const reach0 = H.map((_, k) => {
+    const s = scan(k);
+    const cells = new Set();
+    for (const q of s.targets) for (const o of H[k].offs) if (state[q + o] === BLANK) cells.add(q + o);
+    return cells;
+  });
   const moveTo = (k, path) => {
     const hole = H[k];
     for (const ch of path) {
@@ -496,6 +631,7 @@ function lazyPlay(P, rng, board, plan) {
     solution: mergeMoves(steps),
     key,
     crates,
+    gates: gates.map((i) => [i % w, (i - (i % w)) / w, gateOf[i]]),
   };
 
   /**
@@ -529,7 +665,7 @@ function lazyPlay(P, rng, board, plan) {
           let blanks = 0;
           for (const o of hole.offs) {
             const i = q + o;
-            if (wall[i] || (occ[i] !== -1 && occ[i] !== a)) {
+            if (!passable(A[a], i) || (occ[i] !== -1 && occ[i] !== a)) {
               ok = false;
               break;
             }
@@ -567,6 +703,7 @@ function lazyPlay(P, rng, board, plan) {
     return null;
   }
 }
+
 
 const STEP_OF = { R: [1, 0], L: [-1, 0], D: [0, 1], U: [0, -1] };
 
@@ -628,7 +765,9 @@ function assemble(board, res) {
     if (spec.axis) hole.axis = spec.axis;
     return hole;
   });
-  return { w, h, grid: rows.map((r) => r.join('')), cats, holes };
+  const def = { w, h, grid: rows.map((r) => r.join('')), cats, holes };
+  if (res.gates && res.gates.length) def.gates = res.gates;
+  return def;
 }
 
 /** Replays a solution and records when each cat drops and how many dropped before that step. */
@@ -911,32 +1050,93 @@ export function generateLevel(params = {}, seed = 1) {
       reject(P, st.stuck ? 'stuck' : 'noStart');
       continue;
     }
-    // Store the shorter of the construction line and the solver's line.
     const solverLine = sol.moves.map((mv) => [mv.hole, mv.path]);
-    const len = (s) => s.reduce((a, x) => a + x[1].length, 0) + 2 * s.length;
-    const solution = len(solverLine) < len(cand.solution) ? solverLine : cand.solution;
     found++;
     const d = difficulty(st);
     const [lo, hi] = P.target;
-    const score = (d < lo ? lo - d : d > hi ? d - hi : 0) + 0.5 * mosaic(cand.def) + rng.next() * 0.01;
+    const score = (d < lo ? lo - d : d > hi ? d - hi : 0) + 1.2 * mosaic(cand.def) + rng.next() * 0.01;
     if (P._debug) (P._debug.cands || (P._debug.cands = [])).push({ ...st, d, mosaic: mosaic(cand.def) });
-    if (!best || score < best.score) best = { def: cand.def, solution, st, d, score };
+    if (!best || score < best.score) best = { def: cand.def, lines: [cand.solution, solverLine], st, d, score };
   }
   if (!best) throw new Error(`generator: no level found (${JSON.stringify(P._debug || {})})`);
-  const out = { id: P.id, w: best.def.w, h: best.def.h };
+  const def = best.def;
+  // Par: the fewest drags found (beam search over whole drags, or the construction / solver line if shorter).
+  const lines = best.lines.map((line) => mergeMoves(line));
+  const found2 = minDrags(new Game(def), { beam: P.parBeam });
+  if (found2) lines.push(found2.moves.map((mv) => [mv.hole, mv.path]));
+  const steps = (line) => line.reduce((a, x) => a + x[1].length, 0);
+  let line = null;
+  for (const l of lines) {
+    if (!verifyDrags(def, l)) continue;
+    if (!line || l.length < line.length || (l.length === line.length && steps(l) < steps(line))) line = l;
+  }
+  if (!line) throw new Error('generator: no verified solution');
+  // Hungry cats: each must drop by the drag that eats it in the par line plus some slack; the hint solver
+  // must still find its way from the start (else other cats, more slack, or none).
+  if (P.hungry > 0) {
+    const plain = def.cats.map((cat) => cat.slice());
+    let ok = false;
+    for (let attempt = 0; attempt < 6 && !ok; attempt++) {
+      def.cats = plain.map((cat) => cat.slice());
+      addHungry({ ...P, hungrySlack: P.hungrySlack + (attempt >= 3 ? 1 : 0) }, rng, def, line);
+      ok = verifyDrags(def, line) && !!solve(new Game(def), { maxNodes: 20000 });
+    }
+    if (!ok) def.cats = plain;
+  }
+  if (!verifyDrags(def, line)) throw new Error('generator: hungry deadlines broke the par line');
+  const out = { id: P.id, w: def.w, h: def.h };
   if (P.hard) out.hard = true;
-  out.grid = best.def.grid;
-  out.cats = best.def.cats;
-  out.holes = best.def.holes;
-  out.solution = best.solution;
+  out.grid = def.grid;
+  out.cats = def.cats;
+  out.holes = def.holes;
+  if (def.gates) out.gates = def.gates;
+  out.par = line.length;
+  out.solution = line;
   out.stats = {
-    drags: best.solution.length,
-    steps: best.solution.reduce((a, s) => a + s[1].length, 0),
+    steps: steps(line),
     difficulty: Math.round(best.d * 100) / 100,
     stalls: Math.round(best.st.stalls * 100) / 100,
     startHoles: best.st.startHoles,
   };
   return out;
+}
+
+/**
+ * True when the drags (list of [hole, path]) win def with the move counter running: endMove() after every
+ * drag, as the UI does, and no hungry cat starves on the way.
+ */
+export function verifyDrags(def, line) {
+  try {
+    const g = new Game(def);
+    for (const [k, path] of line) {
+      if (!applyPath(g, k, path)) return false;
+      g.endMove(null);
+      if (g.isFailed()) return false;
+    }
+    return g.isWon();
+  } catch {
+    return false;
+  }
+}
+
+/** Makes P.hungry cats hungry: deadline = the drag of the par line that eats the cat + P.hungrySlack. */
+function addHungry(P, rng, def, line) {
+  const g = new Game(def);
+  const { w } = def;
+  const dragOf = new Map();
+  line.forEach(([k, path], t) => {
+    for (const ch of path) {
+      const [dx, dy] = STEP_OF[ch];
+      for (const e of g.step(k, dx, dy, [])) if (e.type === 'drop') dragOf.set(e.y * w + e.x, t + 1);
+    }
+    g.endMove(null);
+  });
+  const last = Math.max(2, Math.ceil(line.length * (P.intro === 'hungry' ? 0.35 : 0.6)));
+  const cand = def.cats
+    .map((cat, idx) => ({ idx, t: dragOf.get(cat[1] * w + cat[0]), key: rng.next() }))
+    .filter((o) => def.cats[o.idx].length === 3 && o.t >= 2 && o.t <= last)
+    .sort((a, b) => a.key - b.key || a.idx - b.idx);
+  for (const o of cand.slice(0, P.hungry)) def.cats[o.idx].push({ hungry: o.t + P.hungrySlack });
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -954,11 +1154,11 @@ export function isHard(n) {
 }
 
 const SHAPES_EARLY = { I2: 3, I3: 2, L3: 3, T4: 1, O4: 1 };
-const SHAPES_MID = { I2: 3, I3: 2, L3: 3, T4: 2, L4: 2, S4: 1, O4: 1, I1: 0.5 };
-const SHAPES_LATE = { I2: 3, I3: 2, L3: 3, T4: 2, L4: 2, S4: 2, O4: 1, I1: 0.7, I4: 0.6 };
+const SHAPES_MID = { I2: 3, I3: 2, L3: 3, T4: 2, L4: 2, S4: 1, O4: 1, I1: 0.5, P5: 0.6, L5: 0.5, U5: 0.4, T5: 0.4 };
+const SHAPES_LATE = { I2: 2, I3: 2, L3: 2, T4: 2, L4: 2, S4: 2, O4: 1, I1: 0.6, I4: 0.6, P5: 1, L5: 1, U5: 0.8, T5: 0.8, Z5: 0.6, V5: 0.6, I5: 0.4 };
 
 /** difficulty() aimed at by level n: one continuous, non-decreasing curve (a window is kept around it). */
-const CURVE = [[4, 1.5], [10, 2.3], [20, 3.1], [35, 3.8], [50, 4.4], [100, 5.5]];
+const CURVE = [[4, 1.5], [10, 2.4], [15, 3.3], [20, 4.2], [35, 5.4], [50, 6.2], [100, 7.6]];
 export function targetDifficulty(n) {
   if (n <= CURVE[0][0]) return CURVE[0][1];
   for (let i = 1; i < CURVE.length; i++) {
@@ -971,17 +1171,20 @@ export function targetDifficulty(n) {
   return CURVE[CURVE.length - 1][1];
 }
 
-/** Number of holes that packs a w×h board (3 empty cells) with the given number of extra layers. */
-function holesFor(w, h, layered, avgSize = 3) {
-  return Math.max(2, Math.round((w * h - 3) / (2 * avgSize) - (layered * 0.5)));
+/** Number of holes that packs a w×h board (about 3 free cells) with the given number of extra layers. */
+function holesFor(cells, layered, avgSize) {
+  return Math.max(2, Math.round((cells - 3) / (2 * avgSize) - layered * 0.5));
 }
 
+/** Mechanics introduced on their own gentle level (one new thing each). */
+export const INTRO = Object.freeze({ layers: 7, walls: 11, pentomino: 12, ice: 15, gates: 18, box: 25, hungry: 28, axis: 35, lock: 45 });
+
 /**
- * Generation parameters of level n (≥ 4; 1-3 are hand-made tutorials) on a smooth difficulty curve: board
- * size, holes, layered holes and mechanics grow by tier, and the candidate whose difficulty() falls in a window
- * around targetDifficulty(n) is kept. Every 10th level is hard (aims well above the curve, fewer openers). New
- * mechanics come on gentle levels: layered holes 7, ice 15, boxes 25, axis locks 35, crates + key 45. Levels
- * beyond the pack keep the late mix with per-level variety. Deterministic.
+ * Generation parameters of level n (≥ 4; 1-3 are hand-made tutorials) on a rising difficulty curve: bigger and
+ * tighter boards (fewer free cells), more layers and big shapes, narrow passages, gates and hungry cats; the
+ * candidate whose difficulty() falls in a window around targetDifficulty(n) is kept. Every 10th level is hard
+ * (aims well above the curve: one opener, one or two free cells). Each new mechanic comes first on a gentle
+ * level of its own (see INTRO). Levels beyond the pack keep the late mix with per-level variety. Deterministic.
  */
 export function levelParams(n) {
   const r = createRng(levelSeed(n) ^ 0xa11ce);
@@ -990,12 +1193,15 @@ export function levelParams(n) {
   const P = {
     id: n,
     hard,
-    candidates: endless ? 4 : hard ? 40 : 24,
+    candidates: endless ? 4 : hard ? 60 : 30,
     attempts: endless ? 40 : 300,
     playouts: endless ? 12 : 32,
-    empty: [2, 4],
+    parBeam: endless ? 8 : 96,
   };
-  let intro = false;
+  let intro = null;
+  for (const [k, v] of Object.entries(INTRO)) if (v === n) intro = k;
+  const after = (k) => n > INTRO[k];
+  // Board size.
   let size;
   if (n <= 6) size = n <= 4 ? [4, 6] : [5, 6];
   else if (n <= 10) size = [5, n <= 8 ? 6 : 7];
@@ -1003,40 +1209,80 @@ export function levelParams(n) {
   else if (n <= 35) size = r.chance(0.5) ? [6, 8] : [6, 9];
   else if (n <= 50) size = r.chance(0.5) ? [6, 9] : [7, 9];
   else size = r.pick([[6, 9], [7, 9], [7, 9], [7, 10], [6, 10]]);
-  if (hard && n > 10) size = n <= 30 ? [6, 9] : [7, 9 + (n >= 60 ? 1 : 0)];
+  if (hard && n > 10) size = n <= 30 ? [6, 9] : [7, n >= 60 ? 10 : 9];
   [P.w, P.h] = size;
-  if (n > 40) P.floor = ['rect', 'rect', 'rect', 'corners', 'corners4', 'notch'];
-  // Layered holes: one from level 7, two from 21, up to three late; a 3-layer hole now and then from 51.
-  P.layered = n < 7 ? 0 : n <= 20 ? 1 : n <= 40 ? 2 : r.pick([2, 2, 3]);
-  P.layers3 = n > 50 ? 0.25 : 0;
-  P.shapes = n <= 10 ? SHAPES_EARLY : n <= 35 ? SHAPES_MID : SHAPES_LATE;
+  // Free cells: 2-4 early, 1-2 late, one or two on hard levels.
+  P.empty = n <= 14 ? [2, 4] : n <= 29 ? [2, 3] : n <= 59 ? [1, 3] : [1, 2];
+  if (hard && n >= 20) P.empty = [1, 2];
+  // Layers: one layered hole from 7, then more, with 3-layer holes later.
+  P.layered = n < 7 ? 0 : n <= 14 ? 1 : n <= 30 ? 2 : n <= 50 ? r.pick([2, 3]) : r.pick([3, 3, 4]);
+  P.layers3 = n <= 30 ? 0 : n <= 50 ? 0.2 : 0.4;
+  // Shapes: pentominoes from their intro on.
+  P.shapes = n < INTRO.pentomino ? SHAPES_EARLY : n <= 35 ? SHAPES_MID : SHAPES_LATE;
+  if (n === INTRO.pentomino) {
+    P.shapes = { ...SHAPES_EARLY, P5: 1.2 };
+    P.penta = 1;
+  }
   P.palette = n <= 20 ? 8 : n <= 50 ? 10 : 12;
-  // Up to ~10 colours (every layer is a colour of its own).
   P.maxColors = n <= 10 ? 6 : n <= 20 ? 8 : n <= 50 ? 10 : 11;
-  P.holes = Math.min(holesFor(P.w, P.h, P.layered, n > 35 ? 3.3 : 3), P.maxColors - P.layered - (P.layers3 ? 1 : 0));
-  if (n === 7) intro = true; // first layered hole
-  // Mechanics, each introduced on a gentle level, then sparingly.
-  if (n === 15) {
-    P.ice = 3;
-    intro = true;
-  } else if (n > 15 && r.chance(0.3)) P.ice = 1 + r.int(2);
-  if (n === 25) {
-    P.box = 3;
-    intro = true;
-  } else if (n > 25 && r.chance(0.3)) P.box = 1 + r.int(2);
-  if (n === 35) {
-    P.axis = 2;
-    intro = true;
-  } else if (n > 35 && r.chance(0.3)) P.axis = 1;
-  if (n === 45) {
-    P.lock = 3;
-    intro = true;
-  } else if (n > 45 && r.chance(0.25)) P.lock = 2;
+  const avg = n < INTRO.pentomino ? 3 : n <= 35 ? 3.3 : 3.7;
+  P.holes = Math.min(holesFor(P.w * P.h, P.layered, avg), P.maxColors - P.layered - (P.layers3 ? 1 : 0));
+  // Narrow passages (walls) and pillars.
+  if (n === INTRO.walls) P.fence = true;
+  else if (after('walls')) {
+    const roll = r.next();
+    P.fence = roll < 0.3;
+    P.split = roll >= 0.3 && roll < 0.55;
+    P.walls = !P.fence && !P.split && r.chance(0.5) ? 1 + r.int(2) : 0;
+  }
+  if (n > 40) P.floor = ['rect', 'rect', 'rect', 'corners', 'corners4', 'notch'];
+  // Gates (they route the other holes best on narrow passages).
+  if (n === INTRO.gates) {
+    P.gates = 1;
+    P.fence = true;
+  } else if (after('gates') && r.chance(0.4)) {
+    P.gates = 1 + r.int(2);
+    if (!P.fence && !P.split) P.fence = true;
+    P.walls = 0;
+  }
+  // The other mechanics, each gentle at first, then now and then.
+  if (n === INTRO.ice) P.ice = 3;
+  else if (after('ice') && r.chance(0.3)) P.ice = 1 + r.int(2);
+  if (n === INTRO.box) P.box = 3;
+  else if (after('box') && r.chance(0.3)) P.box = 1 + r.int(2);
+  if (n === INTRO.hungry) {
+    P.hungry = 1;
+    P.hungrySlack = 3;
+  } else if (after('hungry') && r.chance(0.45)) {
+    P.hungry = 1 + r.int(2);
+    P.hungrySlack = hard ? 1 : 2;
+  }
+  if (n === INTRO.axis) P.axis = 2;
+  else if (after('axis') && r.chance(0.3)) P.axis = 1;
+  if (n === INTRO.lock) P.lock = 3;
+  else if (after('lock') && r.chance(0.25)) P.lock = 2;
   // Openers: holes free to eat at the start (the others are walled in by other colours).
-  P.openers = hard ? 1 : n <= 6 ? P.holes - 1 : n <= 10 ? 3 : n <= 20 ? r.pick([2, 3]) : 2;
-  const base = endless ? targetDifficulty(100) - 0.3 + 0.5 * r.next() : targetDifficulty(n);
-  if (intro) P.target = [0, Math.max(1, base - 1.5)]; // the new thing is the point: an easy level
-  else if (hard) P.target = [base + 1.2, base + 3];
-  else P.target = [base - 0.25, base + 0.25];
+  P.openers = hard ? 1 : n <= 6 ? P.holes - 1 : n <= 10 ? 3 : n <= 14 ? 2 : r.pick([1, 2, 2]);
+  if (intro) {
+    // The new thing is the point: an easy level with room to breathe and nothing else new on it.
+    const keep = {
+      walls: ['fence'],
+      gates: ['fence', 'gates'],
+      ice: ['ice'],
+      box: ['box'],
+      hungry: ['hungry', 'hungrySlack'],
+      axis: ['axis'],
+      lock: ['lock'],
+    }[intro] || [];
+    for (const k of ['fence', 'split', 'walls', 'gates', 'ice', 'box', 'hungry', 'axis', 'lock']) if (!keep.includes(k)) delete P[k];
+    P.openers = Math.max(P.openers, 2);
+    P.empty = [2, 4];
+    if (P.hungry) P.hungrySlack = 3;
+  }
+  P.intro = intro;
+  const base = endless ? targetDifficulty(100) - 0.5 + r.next() : targetDifficulty(n);
+  if (intro) P.target = [0, Math.max(1.2, base - 2)];
+  else if (hard) P.target = [base + 2, base + 5];
+  else P.target = [base - 0.3, base + 0.3];
   return P;
 }

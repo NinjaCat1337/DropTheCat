@@ -11,6 +11,11 @@
 //            { box: 1 }  hidden in a box: blocks every hole until a cat next to it (4-neighbour) drops,
 //            { ice: n }  frozen: blocks every hole until n more cats (anywhere) have dropped,
 //            { key: 1 }  carries the key: when it drops, every 'L' crate opens,
+//            { hungry: D }  hungry cat: it must drop before the move counter reaches D (see Game.moves),
+//                           otherwise the level is lost (Game.isFailed); cannot be boxed or frozen,
+//     gates: [[x, y, c], ...]  optional coloured gates on floor cells: only a hole whose current colour is c
+//            may cover such a cell; cats never stand on gates. c must be the colour of a single-layer hole
+//            (a layered hole changes colour and could be shut out behind its own gate).
 //     holes: [{ x, y, c, cells: [[dx, dy], ...], need, next?: [[c2, need2], ...], axis?: 'h' | 'v' }, ...] }
 // x = column (0 = left), y = row (0 = top). A hole at (x, y) covers (x + dx, y + dy) for each of its cells.
 // Layered holes: a hole with `next` first takes `need` cats of colour c; then it turns colour c2 and takes
@@ -65,6 +70,7 @@ export function compileLevel(def) {
   const color = new Int8Array(n).fill(-1);
   const flags = new Uint8Array(n);
   const ice = new Uint8Array(n);
+  const hungry = new Int16Array(n);
   const perColor = new Array(MAX_COLORS).fill(0);
   let keys = 0;
   if (!Array.isArray(def.cats)) fail('cats must be an array');
@@ -89,6 +95,11 @@ export function compileLevel(def) {
         if (!Number.isInteger(mods.ice) || mods.ice < 0 || mods.ice > 99) fail(`bad ice at ${x},${y}`);
         if (mods.box) fail(`cat at ${x},${y} cannot be both boxed and frozen`);
         ice[i] = mods.ice;
+      }
+      if (mods.hungry !== undefined && mods.hungry !== 0) {
+        if (!Number.isInteger(mods.hungry) || mods.hungry < 1 || mods.hungry > 999) fail(`bad hungry at ${x},${y}`);
+        if (mods.box || ice[i]) fail(`hungry cat at ${x},${y} cannot be boxed or frozen`);
+        hungry[i] = mods.hungry;
       }
     }
   }
@@ -176,6 +187,29 @@ export function compileLevel(def) {
     }
   }
 
+  const gate = new Int8Array(n).fill(-1);
+  let hasGates = false;
+  if (def.gates !== undefined && def.gates !== null) {
+    if (!Array.isArray(def.gates)) fail('gates must be an array');
+    for (const g of def.gates) {
+      if (!Array.isArray(g) || g.length !== 3) fail('a gate must be [x, y, colour]');
+      const [x, y, c] = g;
+      if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x >= w || y >= h) fail(`gate off board at ${x},${y}`);
+      if (!Number.isInteger(c) || c < 0 || c >= MAX_COLORS) fail(`bad gate colour ${c} at ${x},${y}`);
+      const i = y * w + x;
+      if (ground[i] !== FLOOR) fail(`gate at ${x},${y} is not on plain floor`);
+      if (color[i] !== -1) fail(`gate at ${x},${y} holds a cat`);
+      if (gate[i] !== -1) fail(`two gates at ${x},${y}`);
+      const k = taken[i];
+      if (k !== -1 && holes[k].layers[0].c !== c) fail(`hole ${k} starts on a gate of another colour at ${x},${y}`);
+      if (!holes.some((hole) => hole.layers.length === 1 && hole.layers[0].c === c)) {
+        fail(`gate colour ${c} at ${x},${y} must belong to a single-layer hole`);
+      }
+      gate[i] = c;
+      hasGates = true;
+    }
+  }
+
   const catCells = [];
   for (let i = 0; i < n; i++) if (color[i] !== -1) catCells.push(i);
   return Object.freeze({
@@ -184,10 +218,12 @@ export function compileLevel(def) {
     n,
     ground,
     hasLocks,
+    hasGates,
+    gate,
     holes: Object.freeze(holes),
     catCells: Object.freeze(catCells),
     colors: Object.freeze(perColor.map((v, c) => (v > 0 ? c : -1)).filter((c) => c >= 0)),
-    cat0: Object.freeze({ color, flags, ice }),
+    cat0: Object.freeze({ color, flags, ice, hungry }),
     hole0: Object.freeze({ x: hx, y: hy, need }),
     def,
   });
@@ -206,6 +242,9 @@ export function compileLevel(def) {
  *   { type: 'layer', hole, c, prev, need, hx, hy }    a layer is full: the hole turned colour c (from prev)
  *   { type: 'complete', hole, x, y }                  the hole is full and closed
  *   { type: 'win' }                                   every hole has closed
+ * endMove() (called by the UI after each finished drag) returns:
+ *   { type: 'hungry', x, y, left }                    a hungry cat now has `left` moves to go (left ≥ 1)
+ *   { type: 'starve', x, y, c }                       a hungry cat waited too long: the level is lost
  */
 export class Game {
   /** @param {object} level a level definition or the result of compileLevel() */
@@ -221,6 +260,8 @@ export class Game {
     this.layer = new Uint8Array(L.holes.length);
     this.locked = L.hasLocks;
     this.dropped = 0;
+    this.moves = 0;
+    this.grace = 0;
     this.holeAt = new Int8Array(L.n);
     this.rebuild();
   }
@@ -263,6 +304,8 @@ export class Game {
     g.layer = this.layer.slice();
     g.locked = this.locked;
     g.dropped = this.dropped;
+    g.moves = this.moves;
+    g.grace = this.grace;
     g.holeAt = this.holeAt.slice();
     return g;
   }
@@ -279,6 +322,8 @@ export class Game {
       layer: this.layer.slice(),
       locked: this.locked,
       dropped: this.dropped,
+      moves: this.moves,
+      grace: this.grace,
     };
   }
 
@@ -294,6 +339,8 @@ export class Game {
     else this.layer.fill(0);
     this.locked = s.locked;
     this.dropped = s.dropped;
+    this.moves = Number.isInteger(s.moves) ? s.moves : 0;
+    this.grace = Number.isInteger(s.grace) ? s.grace : 0;
     this.rebuild();
   }
 
@@ -311,6 +358,8 @@ export class Game {
       layer: Array.from(s.layer),
       locked: s.locked,
       dropped: s.dropped,
+      moves: s.moves,
+      grace: s.grace,
     };
   }
 
@@ -349,6 +398,8 @@ export class Game {
         layer: Uint8Array.from(layer),
         locked: !!data.locked && L.hasLocks,
         dropped: Number.isInteger(data.dropped) ? data.dropped : 0,
+        moves: Number.isInteger(data.moves) && data.moves >= 0 ? data.moves : 0,
+        grace: Number.isInteger(data.grace) && data.grace >= 0 ? data.grace : 0,
       });
       // Every open hole must stand on cells it may occupy, without overlapping another hole.
       const seen = new Int8Array(L.n).fill(-1);
@@ -436,6 +487,52 @@ export class Game {
     return (this.flags[y * this.L.w + x] & KEY) !== 0;
   }
 
+  /** Colour of the gate on (x, y), or -1. */
+  gateAt(x, y) {
+    if (x < 0 || y < 0 || x >= this.L.w || y >= this.L.h) return -1;
+    return this.L.gate[y * this.L.w + x];
+  }
+
+  /** Moves left for the hungry cat on (x, y) (≤ 0 = it starved), or null when it is not a hungry cat. */
+  hungerAt(x, y) {
+    const i = y * this.L.w + x;
+    const d = this.L.cat0.hungry[i];
+    return d && this.color[i] !== -1 ? d + this.grace - this.moves : null;
+  }
+
+  /**
+   * One finished drag (or booster use) of the player: counts the move and reports hungry cats.
+   * @param {object[] | null} [events]
+   */
+  endMove(events = []) {
+    this.moves++;
+    const { w, catCells } = this.L;
+    const hungry = this.L.cat0.hungry;
+    for (const i of catCells) {
+      const d = hungry[i];
+      if (!d || this.color[i] === -1) continue;
+      const left = d + this.grace - this.moves;
+      if (events) {
+        const x = i % w;
+        const y = (i - x) / w;
+        events.push(left <= 0 ? { type: 'starve', x, y, c: this.color[i] } : { type: 'hungry', x, y, left });
+      }
+    }
+    return events;
+  }
+
+  /** True when a hungry cat is still on the board after its last move (the level is lost). */
+  isFailed() {
+    const hungry = this.L.cat0.hungry;
+    for (const i of this.L.catCells) if (hungry[i] && this.color[i] !== -1 && hungry[i] + this.grace - this.moves <= 0) return true;
+    return false;
+  }
+
+  /** Snack booster: every hungry cat waits n more moves. */
+  feed(n) {
+    this.grace += n;
+  }
+
   iceAt(x, y) {
     return this.ice[y * this.L.w + x];
   }
@@ -444,6 +541,8 @@ export class Game {
   cellOpen(c, i) {
     const g = this.L.ground[i];
     if (g === VOID || g === WALL || (g === LOCK && this.locked)) return false;
+    const gate = this.L.gate[i];
+    if (gate !== -1 && gate !== c) return false;
     const cc = this.color[i];
     if (cc === -1) return true;
     return cc === c && (this.flags[i] & BOX) === 0 && this.ice[i] === 0;

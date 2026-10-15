@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Game } from '../../src/core/rules.js';
-import { solve, hint, replay, applyPath, explorer, STEPS } from '../../src/core/solver.js';
+import { solve, hint, replay, applyPath, explorer, STEPS, minDrags, hasHungry } from '../../src/core/solver.js';
 import { getLevel, LEVEL_COUNT } from '../../src/core/levels.js';
 
 const I1 = [[0, 0]];
@@ -261,4 +261,81 @@ test('on levels with one hole per colour the solver wins from any reachable stat
       assert.ok(wins(g, r.moves), `level ${n} trial ${trial} replays`);
     }
   }
+});
+
+/** Plays drags like the UI: endMove() after each; false when a hungry cat starves or a drag is illegal. */
+function playDrags(game, moves) {
+  const g = game.clone();
+  for (const mv of moves) {
+    if (!applyPath(g, mv.hole, mv.path)) return null;
+    g.endMove(null);
+    if (g.isFailed()) return null;
+  }
+  return g;
+}
+
+test('minDrags finds the fewest drags: a hole sweeps all its cats in one drag', () => {
+  // The red hole can take its three cats in one continuous drag (through its own cats).
+  const def = lvl(
+    ['.....', '.....'],
+    [[1, 0, 0], [2, 0, 0], [2, 1, 0], [4, 0, 5], [4, 1, 5]],
+    [
+      { x: 0, y: 0, c: 0, cells: I1, need: 3 },
+      { x: 3, y: 0, c: 5, cells: [[0, 0], [0, 1]], need: 2 },
+    ],
+  );
+  const g = new Game(def);
+  const r = minDrags(g, { beam: 16 });
+  assert.ok(r);
+  assert.equal(r.drags, 2);
+  assert.equal(r.moves.length, 2);
+  assert.notEqual(r.moves[0].hole, r.moves[1].hole);
+  assert.ok(playDrags(g, r.moves).isWon());
+});
+
+test('hints respect hungry cats: the right hole goes first, from the live move counter', () => {
+  // Hole 0 (blue) comes first in a plain search, but the hungry red cat must be eaten in drag 1.
+  const def = lvl(
+    ['....', '....'],
+    [[3, 0, 0, { hungry: 1 }], [1, 1, 5], [2, 1, 5]],
+    [
+      { x: 0, y: 1, c: 5, cells: I1, need: 2 },
+      { x: 0, y: 0, c: 0, cells: I1, need: 1 },
+    ],
+  );
+  const g = new Game(def);
+  assert.ok(hasHungry(g));
+  const h = hint(g);
+  assert.equal(h.hole, 1, 'red first');
+  const r = solve(g);
+  assert.ok(r && playDrags(g, r.moves).isWon(), 'no cat starves');
+  // Once the deadline has passed, there is no way to win.
+  const late = g.clone();
+  late.endMove(null);
+  assert.equal(late.isFailed(), true);
+  assert.equal(hint(late), null);
+  // With one move used up but the cat still due in move 2, the hint still saves it.
+  const def2 = { ...def, cats: [[3, 0, 0, { hungry: 2 }], [1, 1, 5], [2, 1, 5]] };
+  const g2 = new Game(def2);
+  g2.endMove(null);
+  const h2 = hint(g2);
+  assert.equal(h2.hole, 1);
+});
+
+test('solves levels with gates', () => {
+  // Only red may pass the gate in the corridor; blue goes round.
+  const def = lvl(
+    ['.....', '.###.', '.....'],
+    [[4, 0, 0], [4, 2, 5]],
+    [
+      { x: 0, y: 0, c: 0, cells: I1, need: 1 },
+      { x: 0, y: 2, c: 5, cells: I1, need: 1 },
+    ],
+  );
+  def.gates = [[2, 0, 0]];
+  const g = new Game(def);
+  const r = solve(g);
+  assert.ok(r && wins(g, r.moves));
+  const md = minDrags(g, { beam: 8 });
+  assert.equal(md.drags, 2);
 });

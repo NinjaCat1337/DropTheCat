@@ -427,3 +427,91 @@ test('canEverCollect and isStuck use the current layer colour', () => {
   assert.equal(g.canEverCollect(0), true, 'blue cats are next to it now');
   assert.equal(g.isStuck(), false);
 });
+
+// ---------------------------------------------------------------------------------------------------------
+// Coloured gates and hungry cats
+// ---------------------------------------------------------------------------------------------------------
+
+test('a gate lets only the hole of its colour pass', () => {
+  const def = lvl(['....', '....'], [[3, 0, 0], [3, 1, 5]], [
+    { x: 0, y: 0, c: 0, cells: I1, need: 1 },
+    { x: 0, y: 1, c: 5, cells: I1, need: 1 },
+  ]);
+  def.gates = [[1, 0, 0], [1, 1, 0]];
+  const g = new Game(def);
+  assert.equal(g.gateAt(1, 0), 0);
+  assert.equal(g.gateAt(2, 0), -1);
+  assert.equal(g.gateAt(-1, 0), -1);
+  assert.ok(g.canStep(0, 1, 0), 'red passes its own gate');
+  assert.equal(g.canStep(1, 1, 0), false, 'blue is stopped by a red gate');
+  assert.equal(g.canEverCollect(1), false, 'blue is shut out for good');
+  g.step(0, 1, 0);
+  g.step(0, 1, 0);
+  assert.deepEqual(types(g.step(0, 1, 0)), ['drop', 'complete']);
+});
+
+test('compileLevel validates gates', () => {
+  const base = () => {
+    const def = lvl(['....', '....'], [[3, 0, 0], [3, 1, 5], [2, 1, 6]], [
+      { x: 0, y: 0, c: 0, cells: I1, need: 1 },
+      { x: 0, y: 1, c: 5, cells: I1, need: 1, next: [[6, 1]] },
+    ]);
+    def.gates = [[1, 0, 0]];
+    return def;
+  };
+  assert.doesNotThrow(() => compileLevel(base()));
+  const bad = (mutate, re) => {
+    const def = base();
+    mutate(def);
+    assert.throws(() => compileLevel(def), re);
+  };
+  bad((d) => (d.gates = 'x'), /gates must be an array/);
+  bad((d) => (d.gates = [[1, 0]]), /a gate must be \[x, y, colour\]/);
+  bad((d) => (d.gates = [[9, 0, 0]]), /gate off board/);
+  bad((d) => (d.gates = [[1, 0, 12]]), /bad gate colour/);
+  bad((d) => (d.gates = [[3, 0, 0]]), /holds a cat/);
+  bad((d) => (d.gates = [[1, 0, 0], [1, 0, 0]]), /two gates/);
+  bad((d) => (d.gates = [[1, 0, 5]]), /must belong to a single-layer hole/);
+  bad((d) => (d.gates = [[0, 1, 0]]), /starts on a gate of another colour/);
+  bad((d) => (d.grid[0] = '.#..') && (d.gates = [[1, 0, 0]]), /not on plain floor/);
+  // A hole may start on a gate of its own colour.
+  assert.doesNotThrow(() => compileLevel({ ...base(), gates: [[0, 0, 0]] }));
+});
+
+test('hungry cats must drop before the move counter reaches their number', () => {
+  const def = lvl(['....'], [[1, 0, 0, { hungry: 2 }], [3, 0, 0]], [{ x: 0, y: 0, c: 0, cells: I1, need: 2 }]);
+  const late = new Game(def);
+  assert.equal(late.moves, 0);
+  assert.equal(late.hungerAt(1, 0), 2);
+  assert.equal(late.hungerAt(3, 0), null, 'not a hungry cat');
+  assert.deepEqual(late.endMove(), [{ type: 'hungry', x: 1, y: 0, left: 1 }]);
+  assert.equal(late.isFailed(), false);
+  assert.deepEqual(late.endMove(), [{ type: 'starve', x: 1, y: 0, c: 0 }]);
+  assert.equal(late.isFailed(), true);
+  // Eaten during the second drag: in time.
+  const ok = new Game(def);
+  ok.endMove(null);
+  ok.step(0, 1, 0);
+  assert.deepEqual(ok.endMove(), []);
+  assert.equal(ok.isFailed(), false);
+  assert.equal(ok.hungerAt(1, 0), null);
+  assert.equal(ok.moves, 2);
+  // The move counter is part of the saved state.
+  const back = Game.fromJSON(def, JSON.parse(JSON.stringify(late.toJSON())));
+  assert.equal(back.moves, 2);
+  assert.equal(back.isFailed(), true);
+  const snap = ok.snapshot();
+  ok.endMove(null);
+  ok.restore(snap);
+  assert.equal(ok.moves, 2);
+  assert.equal(ok.clone().moves, 2);
+});
+
+test('compileLevel validates hungry cats', () => {
+  const mk = (mods) => lvl(['...'], [[1, 0, 0, mods], [2, 0, 0]], [{ x: 0, y: 0, c: 0, cells: I1, need: 2 }]);
+  assert.doesNotThrow(() => compileLevel(mk({ hungry: 3 })));
+  assert.throws(() => compileLevel(mk({ hungry: 3, box: 1 })), /cannot be boxed or frozen/);
+  assert.throws(() => compileLevel(mk({ hungry: 3, ice: 2 })), /cannot be boxed or frozen/);
+  assert.throws(() => compileLevel(mk({ hungry: 1.5 })), /bad hungry/);
+  assert.throws(() => compileLevel(mk({ hungry: -1 })), /bad hungry/);
+});

@@ -9,19 +9,22 @@ import {
   levelSeed,
   playStats,
   verifySolution,
+  verifyDrags,
   difficulty,
   targetDifficulty,
   isHard,
   mosaic,
+  INTRO,
 } from '../../src/core/generator.js';
 import { solve, explorer } from '../../src/core/solver.js';
 
-const QUICK = { candidates: 2, playouts: 6 };
+const QUICK = { candidates: 2, playouts: 6, parBeam: 8 };
 
-/** Empty floor cells at the start. */
+/** Empty floor cells at the start (gates and crates are not empty). */
 function emptyCells(def) {
   const used = new Set(def.cats.map(([x, y]) => y * def.w + x));
   for (const hole of def.holes) for (const [dx, dy] of hole.cells) used.add((hole.y + dy) * def.w + hole.x + dx);
+  for (const [x, y] of def.gates || []) used.add(y * def.w + x);
   let empty = 0;
   for (let y = 0; y < def.h; y++) for (let x = 0; x < def.w; x++) if (def.grid[y][x] === '.' && !used.has(y * def.w + x)) empty++;
   return empty;
@@ -34,6 +37,7 @@ function checkDesign(def, label) {
   const colours = [];
   for (const hole of def.holes) {
     assert.equal(hole.need, hole.cells.length, `${label}: need = cells`);
+    assert.ok(hole.cells.length <= 5, `${label}: at most pentominoes`);
     colours.push(hole.c);
     for (const [c, need] of hole.next || []) {
       assert.equal(need, hole.cells.length, `${label}: every layer needs as many cats as the hole has cells`);
@@ -43,8 +47,11 @@ function checkDesign(def, label) {
   assert.equal(new Set(colours).size, colours.length, `${label}: one hole per colour (layers included)`);
   assert.ok(colours.length <= MAX_COLORS, `${label}: colours`);
   const empty = emptyCells(def);
-  assert.ok(empty >= 2 && empty <= 4, `${label}: ${empty} empty cells`);
+  assert.ok(empty >= 1 && empty <= 4, `${label}: ${empty} empty cells`);
+  assert.equal(def.par, def.solution.length, `${label}: one stored drag per par`);
+  for (let i = 1; i < def.solution.length; i++) assert.notEqual(def.solution[i][0], def.solution[i - 1][0], `${label}: drags alternate holes`);
   assert.ok(verifySolution(def, def.solution), `${label}: stored solution wins`);
+  assert.ok(verifyDrags(def, def.solution), `${label}: and with endMove after every drag`);
   const g = new Game(def);
   assert.ok(explorer(g.L).unique, `${label}: unique colours`);
   assert.ok(explorer(g.L).productiveMoves(g).length > 0, `${label}: a productive first move`);
@@ -58,21 +65,47 @@ test('the same (params, seed) gives the same level', () => {
   assert.notDeepEqual(generateLevel(P, 1235).cats, a.cats);
 });
 
-test('generated levels are packed mosaics with one hole per colour, solvable by construction', () => {
+test('generated levels are packed mosaics with one hole per colour and a par', () => {
   const sets = [
     { w: 4, h: 6, holes: 4, openers: 3 },
     { w: 5, h: 7, holes: 5, layered: 1 },
-    { w: 6, h: 9, holes: 8, layered: 2, palette: 10, maxColors: 10 },
-    { w: 7, h: 10, holes: 8, layered: 3, layers3: 0.5, palette: 12, maxColors: 11 },
+    { w: 6, h: 9, holes: 7, layered: 2, palette: 10, maxColors: 10, empty: [1, 2] },
+    { w: 7, h: 10, holes: 6, layered: 3, layers3: 0.5, palette: 12, maxColors: 11, empty: [1, 2] },
     { w: 99, h: 99, holes: 8, layered: 2, palette: 10 }, // clamped to 7×10
   ];
   sets.forEach((P, i) => {
     for (const seed of [1, 2]) {
       const def = generateLevel({ ...P, ...QUICK }, seed * 7919 + i);
       checkDesign(def, `set ${i} seed ${seed}`);
-      assert.ok(def.stats && def.stats.drags === def.solution.length, `set ${i}: stats`);
+      assert.ok(def.par >= def.holes.length, `set ${i}: every hole needs a drag`);
+      assert.ok(def.stats && def.stats.steps > 0, `set ${i}: stats`);
     }
   });
+});
+
+test('narrow passages, gates and pentominoes', () => {
+  const fence = generateLevel({ w: 6, h: 9, holes: 6, layered: 1, fence: true, gates: 1, shapes: { I2: 2, L3: 2, P5: 2, U5: 1 }, ...QUICK }, 21);
+  checkDesign(fence, 'fence');
+  assert.ok(fence.grid.some((r) => r.includes('#')), 'a wall line');
+  assert.equal(fence.gates.length, 1);
+  const [gx, gy, gc] = fence.gates[0];
+  assert.equal(fence.grid[gy][gx], '.');
+  const owner = fence.holes.filter((h) => h.c === gc);
+  assert.equal(owner.length, 1, 'the gate colour belongs to one hole');
+  assert.ok(!owner[0].next, 'a single-layer hole');
+  assert.ok(fence.holes.some((h) => h.cells.length === 5), 'a pentomino hole');
+  const split = generateLevel({ w: 7, h: 9, holes: 7, layered: 2, split: true, gates: 2, ...QUICK }, 22);
+  checkDesign(split, 'split');
+  assert.equal(split.gates.length, 2);
+});
+
+test('hungry cats get deadlines from the par line', () => {
+  const def = generateLevel({ w: 6, h: 8, holes: 6, layered: 1, hungry: 2, hungrySlack: 2, ...QUICK }, 31);
+  checkDesign(def, 'hungry');
+  const hungry = def.cats.filter((c) => c[3] && c[3].hungry);
+  assert.equal(hungry.length, 2);
+  // Each one is eaten in time by the stored drags (verifyDrags), and not frozen or boxed.
+  for (const cat of hungry) assert.deepEqual(Object.keys(cat[3]), ['hungry']);
 });
 
 test('mechanics appear where the stored solution allows them', () => {
@@ -106,29 +139,43 @@ test('playStats and evaluateLevel measure a level', () => {
   assert.equal(ev.difficulty, difficulty(st));
   assert.equal(ev.cats, def.cats.length);
   assert.equal(ev.holes, def.holes.length);
-  assert.ok(ev.empty >= 2 && ev.empty <= 4);
   assert.ok(ev.mosaic >= 0 && ev.mosaic <= 1);
   assert.equal(mosaic({ w: 2, h: 1, cats: [[0, 0, 1], [1, 0, 1]] }), 1);
   assert.equal(mosaic({ w: 2, h: 1, cats: [[0, 0, 1], [1, 0, 2]] }), 0);
 });
 
-test('the campaign curve rises smoothly; hard levels and gentle introductions', () => {
+test('the campaign curve: tighter, harder, one new thing per intro level', () => {
   let last = -1;
   for (let n = 4; n <= 100; n++) {
     const t = targetDifficulty(n);
     assert.ok(t >= last - 1e-9, `target(${n})`);
     last = t;
   }
-  const firstWith = (pred) => {
-    for (let n = 4; n <= 100; n++) if (pred(levelParams(n))) return n;
-    return 0;
+  assert.ok(targetDifficulty(20) > targetDifficulty(10) + 1.5, 'it climbs from level 15 on');
+  const has = {
+    layers: (P) => P.layered > 0,
+    walls: (P) => P.fence || P.split || P.walls > 0,
+    pentomino: (P) => Object.keys(P.shapes).some((s) => s.endsWith('5')),
+    ice: (P) => P.ice > 0,
+    gates: (P) => P.gates > 0,
+    box: (P) => P.box > 0,
+    hungry: (P) => P.hungry > 0,
+    axis: (P) => P.axis > 0,
+    lock: (P) => P.lock > 0,
   };
-  assert.equal(firstWith((P) => P.layered > 0), 7);
-  assert.equal(firstWith((P) => P.ice > 0), 15);
-  assert.equal(firstWith((P) => P.box > 0), 25);
-  assert.equal(firstWith((P) => P.axis > 0), 35);
-  assert.equal(firstWith((P) => P.lock > 0), 45);
-  for (const n of [7, 15, 25, 35, 45]) assert.ok(levelParams(n).target[1] < targetDifficulty(n), `intro ${n} is gentle`);
+  for (const [name, at] of Object.entries(INTRO)) {
+    let first = 0;
+    for (let n = 4; n <= 100 && !first; n++) if (has[name](levelParams(n))) first = n;
+    assert.equal(first, at, `${name} first on level ${at}`);
+    const P = levelParams(at);
+    assert.equal(P.intro, name);
+    assert.ok(P.target[1] < targetDifficulty(at), `intro ${at} is gentle`);
+    for (const [other, test2] of Object.entries(has)) {
+      if (other === name || INTRO[other] > at || other === 'layers' || other === 'pentomino') continue;
+      if (name === 'gates' && other === 'walls') continue; // gates sit on narrow passages
+      assert.ok(!test2(P), `intro ${at} (${name}) shows nothing else new: ${other}`);
+    }
+  }
   for (let n = 4; n <= 160; n++) {
     const P = levelParams(n);
     assert.deepEqual(levelParams(n), P, `deterministic ${n}`);
@@ -137,7 +184,11 @@ test('the campaign curve rises smoothly; hard levels and gentle introductions', 
     assert.equal(isHard(n), n % 10 === 0);
     assert.ok(P.w <= 7 && P.h <= 10, `size ${n}`);
     assert.ok(P.holes + P.layered <= P.maxColors && P.maxColors <= MAX_COLORS, `colours ${n}`);
-    if (P.hard && n >= 20) assert.ok(P.target[0] > levelParams(n - 1).target[1], `hard ${n} aims higher`);
+    if (n >= 60 && !P.intro) assert.ok(P.empty[1] <= 2, `late level ${n} has 1-2 free cells`);
+    if (P.hard && n >= 20) {
+      assert.ok(P.empty[1] <= 2 && P.openers === 1, `hard ${n} is tight`);
+      assert.ok(P.target[0] > levelParams(n - 1).target[1], `hard ${n} aims higher`);
+    }
   }
   assert.notEqual(levelSeed(101), levelSeed(102));
 });

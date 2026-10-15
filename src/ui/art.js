@@ -17,10 +17,10 @@
 //
 // Conventions
 //   • All coordinates are CSS px; the caller's transform is restored after every call.
-//   • Draw order (each layer over the previous one): CSS background → board canvas → crates → trails →
-//     holes (badge: false) → falling cats, each inside ctx.save(); art.clipHole(...); art.drawCat(...);
-//     ctx.restore() → standing cats in row order, top row first (a box or ice block right after its cat)
-//     → hole badges (drawHoleBadge) → particles.
+//   • Draw order (each layer over the previous one): CSS background → board canvas → gates → crates →
+//     trails → holes (badge: false) → falling cats, each inside ctx.save(); art.clipHole(...);
+//     art.drawCat(...); ctx.restore() → standing cats in row order, top row first (a box or ice block right
+//     after its cat) → hole badges (drawHoleBadge) and hungry bubbles (drawHungry) → particles.
 //   • Integer cell sizes keep tile edges crisp (fractional ones work, just slightly softer).
 //   • pulse (holes) and crack (ice) are intensities: 1 at the event, decaying to 0. hop / open / closing /
 //     shatter / change are progress values 0 → 1.
@@ -61,6 +61,11 @@
 //
 //   art.drawTrail(ctx, x, y, colour, alpha = 1)   Soft tinted rounded square on the cell whose top-left is
 //       (x, y): what a dragged hole leaves behind for a moment. Draw under the holes.
+//   art.drawGate(ctx, x, y, colour, o)   Coloured gate on the cell whose top-left is (x, y): only a hole of
+//       this colour may cover it. Recessed tinted tile, barrier stripes, chunky frame with studs, paw emblem
+//       (the colour's symbol when setMarks is on), a shimmer now and then. o: { t, active = 0 (0..1 while a
+//       hole of that colour is over it: stripes fade, tile brightens) }. Draw after the board, before
+//       crates and holes.
 //
 //   art.drawHole(ctx, cells, x, y, colour, o)   Hole = pit with a rim, cells merged into one outline.
 //       cells = normalized [[dx,dy],...] (min 0; the same array object every frame is fastest);
@@ -88,7 +93,9 @@
 //
 //   art.drawCat(ctx, cx, cy, colour, o)   cx, cy = cell centre. o: {
 //       t = seconds (blink every 2–6 s, breathing, a mochi wobble now and then), seed = int (timing, eye size),
-//       mood = 'idle' | 'happy' (^ ^ eyes, open smile, little bounces) | 'surprised' (wide eyes, O mouth),
+//       mood = 'idle' | 'happy' (^ ^ eyes, open smile, little bounces) | 'surprised' (wide eyes, O mouth)
+//              | 'hungry' (pleading eyes, worried brows, open mouth with drool, impatient sway)
+//              | 'angry' (narrowed eyes, angry brows, frown, anger mark, trembling),
 //       blink = false (force closed eyes), hop = 0 (0..1 jump with squash & stretch; an idle cat looks happy
 //       while hopping), scale = 1, alpha = 1, rot = 0 (radians, about the cell centre),
 //       tint = 0 (0..1 darkens toward the colour's deep pit shade; the floor shadow fades with it),
@@ -97,6 +104,9 @@
 //     Each colour has its own little personality (purple: Siamese mask, white: fluffy with pale-blue
 //     shading, navy: odd eyes and a light muzzle, grey: tuxedo, brown: ear patch, yellow / orange / blue:
 //     tabby stripes, …).
+//   art.drawHungry(ctx, cx, cy, left, o?)   Speech bubble at the top-right of the cat in cell (cx, cy) with a
+//       fish and the moves left. o: { t, urgent = left ≤ 2 (red, pulsing), scale, size, alpha }. Draw after
+//       all cats (with the hole badges), so neighbours never cover it.
 //   art.drawFallingCat(ctx, cells, hx, hy, cx, cy, colour, p, o?)   Convenience: clip + surprised hop, sink,
 //       shrink, tint and spin for progress p 0..1 (o: { t, seed, key }). drawCat inside clipHole works too.
 //   art.drawBox(ctx, cx, cy, o)    Cardboard box hiding a cat (neutral ears peek out, eyes glint, wiggles
@@ -402,6 +412,16 @@ function cellsPath(cells, d, rc, rv) {
   return p;
 }
 
+/** Paw print (one pad + four toes) centred at (x, y), about s across. */
+function pawPath(p, x, y, s) {
+  const k = s / 0.34;
+  ell(p, x, y + 0.07 * k, 0.105 * k, 0.085 * k);
+  ell(p, x - 0.115 * k, y - 0.035 * k, 0.042 * k, 0.052 * k, -0.35);
+  ell(p, x - 0.042 * k, y - 0.09 * k, 0.042 * k, 0.054 * k, -0.1);
+  ell(p, x + 0.042 * k, y - 0.09 * k, 0.042 * k, 0.054 * k, 0.1);
+  ell(p, x + 0.115 * k, y - 0.035 * k, 0.042 * k, 0.052 * k, 0.35);
+}
+
 /** Path2D of everything except `path` (inside a big rect); fill / clip with 'evenodd'. */
 function inverse(path, x0, y0, x1, y1) {
   const p = new Path2D();
@@ -563,6 +583,9 @@ const FACE_OPEN = 0;
 const FACE_CLOSED = 1;
 const FACE_HAPPY = 2;
 const FACE_SURPRISED = 3;
+const FACE_HUNGRY = 4;
+const FACE_ANGRY = 5;
+const FACE_STATES = 6;
 
 // ═════════════════════════════════════════ createArt ═════════════════════════════════════════
 export function createArt() {
@@ -1010,6 +1033,60 @@ export function createArt() {
         g.moveTo(x - rx * 1.0, ey + 0.025);
         g.quadraticCurveTo(x, ey - 0.06, x + rx * 1.0, ey + 0.025);
         g.stroke();
+      } else if (state === FACE_HUNGRY) {
+        // big pleading eyes, extra sparkles, worried brows (inner ends up)
+        const r1 = rx * 1.2;
+        const r2 = ry * 1.14;
+        g.fillStyle = s < 0 ? E.l : E.r;
+        g.beginPath();
+        ell(g, x, ey + 0.004, r1, r2);
+        g.fill();
+        if (E.pupil) {
+          g.fillStyle = E.pupil;
+          g.beginPath();
+          ell(g, x, ey + r2 * 0.15, r1 * 0.45, r2 * 0.6);
+          g.fill();
+        }
+        g.fillStyle = '#FFFFFF';
+        g.beginPath();
+        ell(g, x - r1 * 0.26, ey - r2 * 0.3, r1 * 0.48, r1 * 0.48);
+        ell(g, x + r1 * 0.34, ey + r2 * 0.34, r1 * 0.25, r1 * 0.25);
+        ell(g, x - r1 * 0.48, ey + r2 * 0.46, r1 * 0.12, r1 * 0.12);
+        g.fill();
+        g.strokeStyle = E.line;
+        g.lineWidth = L * 0.95;
+        g.beginPath();
+        g.moveTo(x + s * 0.055, ey - 0.083);
+        g.lineTo(x - s * 0.045, ey - 0.108);
+        g.stroke();
+      } else if (state === FACE_ANGRY) {
+        // narrowed eyes under angry brows (inner ends down)
+        const d = -s; // toward the face centre
+        g.save();
+        g.beginPath();
+        g.moveTo(x - d * rx * 1.5, ey - ry * 0.55);
+        g.lineTo(x + d * rx * 1.5, ey + ry * 0.05);
+        g.lineTo(x + d * rx * 1.5, ey + ry * 2);
+        g.lineTo(x - d * rx * 1.5, ey + ry * 2);
+        g.closePath();
+        g.clip();
+        g.fillStyle = s < 0 ? E.l : E.r;
+        g.beginPath();
+        ell(g, x, ey + 0.006, rx, ry * 0.9);
+        g.fill();
+        g.fillStyle = '#FFFFFF';
+        g.beginPath();
+        ell(g, x + d * rx * 0.2, ey + ry * 0.25, rx * 0.28, rx * 0.28);
+        g.fill();
+        g.restore();
+        g.strokeStyle = E.line;
+        g.lineWidth = L * 1.1;
+        g.beginPath();
+        g.moveTo(x - d * rx * 1.25, ey - ry * 0.5);
+        g.lineTo(x + d * rx * 1.25, ey + ry * 0.02);
+        g.moveTo(x - d * 0.062, ey - 0.098);
+        g.lineTo(x + d * 0.052, ey - 0.062);
+        g.stroke();
       } else {
         const r = ry * 1.05;
         g.fillStyle = '#FFFFFF';
@@ -1066,6 +1143,47 @@ export function createArt() {
       g.beginPath();
       ell(g, 0, -0.012, 0.022, 0.028);
       g.fill();
+      g.stroke();
+    } else if (state === FACE_HUNGRY) {
+      // open mouth, tongue, a drop of drool
+      g.fillStyle = '#7A2342';
+      g.beginPath();
+      ell(g, 0, -0.016, 0.034, 0.03);
+      g.fill();
+      g.save();
+      g.clip();
+      g.fillStyle = '#FF8DAA';
+      g.beginPath();
+      ell(g, 0, 0.004, 0.026, 0.017);
+      g.fill();
+      g.restore();
+      g.stroke();
+      g.fillStyle = '#C9F0FF';
+      g.strokeStyle = '#4E9FD2';
+      g.lineWidth = L * 0.5;
+      g.beginPath();
+      g.moveTo(0.03, -0.004);
+      g.quadraticCurveTo(0.05, 0.03, 0.033, 0.045);
+      g.quadraticCurveTo(0.014, 0.034, 0.03, -0.004);
+      g.closePath();
+      g.fill();
+      g.stroke();
+    } else if (state === FACE_ANGRY) {
+      g.lineWidth = L * 0.95;
+      g.beginPath();
+      g.moveTo(-0.042, -0.018);
+      g.quadraticCurveTo(0, -0.05, 0.042, -0.018);
+      g.stroke();
+      // anger mark
+      g.strokeStyle = '#FF3B55';
+      g.lineWidth = L * 1.1;
+      g.beginPath();
+      const ax = 0.215;
+      const ay = -0.285;
+      for (const [qx, qy] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
+        g.moveTo(ax + qx * 0.012, ay + qy * 0.048);
+        g.quadraticCurveTo(ax + qx * 0.012, ay + qy * 0.012, ax + qx * 0.048, ay + qy * 0.012);
+      }
       g.stroke();
     } else {
       g.beginPath();
@@ -1151,8 +1269,8 @@ export function createArt() {
     return catSp[0][c] || (catSp[0][c] = sprite(-0.46, -0.53, 0.46, 0.5, (g) => paintBody(g, c)));
   }
   function faceSp(style, big, state) {
-    const i = (style * 2 + big) * 4 + state;
-    return catSp[1][i] || (catSp[1][i] = sprite(-0.31, -0.22, 0.31, 0.05, (g) => paintFace(g, style, big, state)));
+    const i = (style * 2 + big) * FACE_STATES + state;
+    return catSp[1][i] || (catSp[1][i] = sprite(-0.31, -0.35, 0.31, 0.07, (g) => paintFace(g, style, big, state)));
   }
   function shadowSp() {
     return catSp[2][0] || (catSp[2][0] = sprite(-0.42, -0.1, 0.42, 0.1, paintShadow));
@@ -1180,7 +1298,8 @@ export function createArt() {
     const p = catParams(o.seed || 0);
     const tint = o.tint > 0 ? (o.tint < 1 ? o.tint : 1) : 0;
     const hop = o.hop > 0 && o.hop < 1 ? o.hop : 0;
-    let mood = o.mood === 'happy' ? 1 : o.mood === 'surprised' ? 2 : 0;
+    const mo = o.mood;
+    let mood = mo === 'happy' ? 1 : mo === 'surprised' ? 2 : mo === 'hungry' ? 3 : mo === 'angry' ? 4 : 0;
     if (hop && mood === 0) mood = 1;
     const P = PALETTE[c];
 
@@ -1219,6 +1338,10 @@ export function createArt() {
       sy *= 1 + 0.03 * b;
       sx *= 1 - 0.02 * b;
     }
+    let sway = 0;
+    let shake = 0;
+    if (mood === 3) sway = 0.05 * Math.sin(t * 5.2 + p.hp); // impatient side-to-side
+    else if (mood === 4) shake = Math.sin(t * 47 + p.hp) * 0.018; // trembling with rage
     const ga = ctx.globalAlpha;
     const C = cell * k;
     if (o.shadow !== false && tint < 1) {
@@ -1231,15 +1354,17 @@ export function createArt() {
     const a1 = ga * alpha;
     ctx.globalAlpha = a1;
     ctx.save();
-    ctx.translate(cx, cy - lift * HOP_H * C);
+    ctx.translate(cx + shake * C, cy - lift * HOP_H * C);
     if (o.rot) ctx.rotate(o.rot);
     const fy = FOOT * cell;
     ctx.translate(0, fy * k);
+    if (sway) ctx.rotate(sway);
     ctx.scale(k * sx, k * sy);
     ctx.translate(0, -fy);
     const body = bodySp(c);
     blit(ctx, body, 0, 0);
-    const state = mood === 1 ? FACE_HAPPY : mood === 2 ? FACE_SURPRISED : o.blink || isBlink(t, p) ? FACE_CLOSED : FACE_OPEN;
+    const state = mood === 1 ? FACE_HAPPY : mood === 2 ? FACE_SURPRISED : mood === 3 ? FACE_HUNGRY : mood === 4 ? FACE_ANGRY
+      : o.blink || isBlink(t, p) ? FACE_CLOSED : FACE_OPEN;
     blit(ctx, faceSp(LOOKS[c].eyes, p.big, state), 0, 0);
     if (tint > 0) {
       ctx.globalAlpha = a1 * tint;
@@ -1599,13 +1724,7 @@ export function createArt() {
     // paw stamp
     g.fillStyle = P.main === '#FBFAFF' ? rgba(P.dark, 0.95) : rgba('#FFFFFF', 0.92);
     g.beginPath();
-    const x = G.bx;
-    const y = G.by + 0.04;
-    ell(g, x, y + 0.03, 0.105, 0.085);
-    ell(g, x - 0.115, y - 0.075, 0.042, 0.052, -0.35);
-    ell(g, x - 0.042, y - 0.13, 0.042, 0.054, -0.1);
-    ell(g, x + 0.042, y - 0.13, 0.042, 0.054, 0.1);
-    ell(g, x + 0.115, y - 0.075, 0.042, 0.052, 0.35);
+    pawPath(g, G.bx, G.by, 0.34);
     g.fill();
     g.restore();
     g.lineWidth = lw * 0.9;
@@ -1875,6 +1994,198 @@ export function createArt() {
       g.strokeStyle = rgba(c === 8 ? P.dark : P.main, 0.55);
       g.stroke(p);
     }));
+  }
+
+  // ═════════════════════════════════════════ gates ═════════════════════════════════════════
+  // A floor cell only a hole of one colour may cover: a recessed tile tinted with the colour, barrier
+  // stripes, a chunky frame with corner studs and a paw emblem (the colour's symbol in colour-blind mode).
+  const GATE_TILE = new Path2D();
+  rrect(GATE_TILE, 0.075, 0.075, 0.85, 0.85, 0.15);
+
+  function paintGate(g, c, open) {
+    const P = PALETTE[c];
+    const L = lw;
+    const white = c === 8;
+    const tint = white ? mix(FLOOR.a, '#FFFFFF', 0.55) : mix(FLOOR.b, P.main, open ? 0.42 : 0.3);
+    g.fillStyle = tint;
+    g.fill(GATE_TILE);
+    g.save();
+    g.clip(GATE_TILE);
+    if (!open) {
+      g.strokeStyle = rgba(white ? P.dark : P.main, white ? 0.75 : 0.42);
+      g.lineWidth = 0.085;
+      g.beginPath();
+      for (let i = -5; i <= 5; i++) {
+        g.moveTo(i * 0.21, 1.1);
+        g.lineTo(i * 0.21 + 1.2, -0.1);
+      }
+      g.stroke();
+    }
+    g.shadowColor = rgba(mix(P.deep, '#000000', 0.3), white ? 0.3 : 0.45);
+    g.shadowBlur = 0.08 * S;
+    g.shadowOffsetY = 0.04 * S;
+    g.fillStyle = '#000';
+    g.fill(inverse(GATE_TILE, -1, -1, 2, 2), 'evenodd');
+    g.restore();
+    // chunky frame
+    g.lineWidth = 0.075 + 2 * L;
+    g.strokeStyle = P.outline;
+    g.stroke(GATE_TILE);
+    g.lineWidth = 0.075;
+    g.strokeStyle = P.main;
+    g.stroke(GATE_TILE);
+    g.save();
+    g.translate(0, -0.014);
+    g.lineWidth = 0.018;
+    g.strokeStyle = rgba(P.light, 0.85);
+    g.beginPath();
+    g.moveTo(0.22, 0.075);
+    g.lineTo(0.78, 0.075);
+    g.stroke();
+    g.restore();
+    // corner studs
+    for (const [sx, sy] of [[0.12, 0.12], [0.88, 0.12], [0.12, 0.88], [0.88, 0.88]]) {
+      const st = new Path2D();
+      ell(st, sx, sy, 0.058, 0.058);
+      g.lineWidth = 2 * L;
+      g.strokeStyle = P.outline;
+      g.stroke(st);
+      const sg = g.createRadialGradient(sx - 0.02, sy - 0.02, 0.005, sx, sy, 0.06);
+      sg.addColorStop(0, white ? '#FFFFFF' : P.light);
+      sg.addColorStop(1, white ? P.dark : P.main);
+      g.fillStyle = sg;
+      g.fill(st);
+    }
+    // emblem
+    const em = new Path2D();
+    if (marks) symbolPath(em, c, 0.5, 0.5, 0.34);
+    else pawPath(em, 0.5, 0.49, open ? 0.36 : 0.32);
+    g.lineWidth = 2 * L;
+    g.strokeStyle = P.outline;
+    g.stroke(em);
+    g.fillStyle = white ? P.dark : '#FFFFFF';
+    g.fill(em, 'evenodd');
+  }
+
+  function gateSp(c, open) {
+    const key = 'gate' + c + (open ? 'o' : '');
+    return (misc[key] ||= sprite(-0.02, -0.02, 1.02, 1.02, (g) => paintGate(g, c, open)));
+  }
+
+  function shineSp() {
+    return (misc.shine ||= sprite(-0.6, -0.6, 0.6, 0.6, (g) => {
+      g.rotate(-Math.PI / 4);
+      const lg = g.createLinearGradient(-0.2, 0, 0.2, 0);
+      lg.addColorStop(0, 'rgba(255,255,255,0)');
+      lg.addColorStop(0.5, 'rgba(255,255,255,0.55)');
+      lg.addColorStop(1, 'rgba(255,255,255,0)');
+      g.fillStyle = lg;
+      g.fillRect(-0.2, -0.9, 0.4, 1.8);
+    }));
+  }
+
+  function drawGate(ctx, x, y, colour, o) {
+    if (!o) o = EMPTY;
+    const c = col(colour);
+    const t = o.t || 0;
+    const active = o.active > 0 ? (o.active < 1 ? o.active : 1) : 0;
+    const ga = ctx.globalAlpha;
+    if (active < 1) {
+      ctx.globalAlpha = ga * (1 - active);
+      blit(ctx, gateSp(c, false), x, y);
+    }
+    if (active > 0) {
+      ctx.globalAlpha = ga * active;
+      blit(ctx, gateSp(c, true), x, y);
+    }
+    ctx.globalAlpha = ga;
+    // shimmer sweeping across now and then (each gate at its own time)
+    const period = 3.2;
+    let u = (t + ((x * 0.37 + y * 0.61) / cell) * 0.9) % period;
+    if (u < 0) u += period;
+    if (u < 0.9) {
+      const sh = shineSp();
+      const d = -0.75 + (u / 0.9) * 1.5;
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.scale(cell, cell);
+      ctx.clip(GATE_TILE);
+      ctx.globalAlpha = ga * (0.75 + 0.25 * active);
+      ctx.drawImage(sh.c, 0.5 + d - sh.ox / cell, 0.5 + d - sh.oy / cell, sh.w / cell, sh.h / cell);
+      ctx.restore();
+    }
+  }
+
+  // ═════════════════════════════════════════ hungry cats ═════════════════════════════════════════
+  function hungrySp(n, urgent) {
+    const key = 'h' + n + (urgent ? 'u' : '');
+    let sp = textC.get(key);
+    if (sp) return sp;
+    const str = String(n);
+    const nw = measureCells(str, 0.2);
+    const bw = 0.205 + nw + 0.075;
+    const bh = 0.27;
+    trim();
+    sp = sprite(-bw / 2 - 0.06, -bh / 2 - 0.05, bw / 2 + 0.05, bh / 2 + 0.13, (g) => {
+      const fill = urgent ? '#FF5A6E' : '#FFFFFF';
+      const line = urgent ? '#8E1530' : '#6E5C9C';
+      const bubble = new Path2D();
+      rrect(bubble, -bw / 2, -bh / 2, bw, bh, bh / 2);
+      const tail = new Path2D();
+      tail.moveTo(-bw / 2 + 0.07, bh / 2 - 0.04);
+      tail.lineTo(-bw / 2 - 0.005, bh / 2 + 0.095);
+      tail.lineTo(-bw / 2 + 0.17, bh / 2 - 0.015);
+      tail.closePath();
+      g.lineWidth = 2 * lw;
+      g.strokeStyle = line;
+      g.stroke(bubble);
+      g.stroke(tail);
+      g.fillStyle = fill;
+      g.fill(bubble);
+      g.fill(tail);
+      g.fillStyle = 'rgba(255,255,255,0.45)';
+      g.beginPath();
+      ell(g, -bw / 2 + 0.11, -bh / 2 + 0.06, 0.06, 0.022, -0.2);
+      g.fill();
+      // fish
+      const fx = -bw / 2 + 0.125;
+      const fy = 0.008;
+      const fish = new Path2D();
+      ell(fish, fx, fy, 0.064, 0.041);
+      fish.moveTo(fx - 0.052, fy);
+      fish.lineTo(fx - 0.1, fy - 0.042);
+      fish.lineTo(fx - 0.092, fy);
+      fish.lineTo(fx - 0.1, fy + 0.042);
+      fish.closePath();
+      g.lineWidth = lw * 1.4;
+      g.strokeStyle = urgent ? '#8E1530' : '#22609A';
+      g.stroke(fish);
+      g.fillStyle = urgent ? '#FFFFFF' : '#5BB0EE';
+      g.fill(fish);
+      g.fillStyle = urgent ? '#8E1530' : '#183E66';
+      g.beginPath();
+      ell(g, fx + 0.03, fy - 0.009, 0.0095, 0.0095);
+      g.fill();
+      paintText(g, str, fx + 0.085 + nw / 2, 0.006, 0.2, urgent ? '#FFFFFF' : '#2C2347', urgent ? '#8E1530' : null, 0.15, null);
+    });
+    textC.set(key, sp);
+    return sp;
+  }
+
+  function drawHungry(ctx, cx, cy, left, o) {
+    if (!o) o = EMPTY;
+    const n = Math.max(0, Math.floor(left) || 0);
+    const urgent = o.urgent === undefined ? n <= 2 : !!o.urgent;
+    const sp = hungrySp(n, urgent);
+    const t = o.t || 0;
+    const k = (o.size > 0 ? o.size / cell : 1) * (o.scale > 0 ? o.scale : 1);
+    const s = k * (urgent ? 1 + 0.08 * (0.5 + 0.5 * Math.sin(t * 7)) : 1 + 0.02 * Math.sin(t * 2.4));
+    const x = cx + 0.26 * cell * k;
+    const y = cy - 0.4 * cell * k;
+    const ga = ctx.globalAlpha;
+    if (o.alpha !== undefined) ctx.globalAlpha = ga * o.alpha;
+    ctx.drawImage(sp.c, x - sp.ox * s, y - sp.oy * s, sp.w * s, sp.h * s);
+    ctx.globalAlpha = ga;
   }
 
   function drawTrail(ctx, x, y, colour, alpha) {
@@ -2669,6 +2980,8 @@ export function createArt() {
     renderBoard,
     drawCrate,
     drawTrail,
+    drawGate,
+    drawHungry,
     drawHole,
     drawHoleBadge,
     badgeAt,
@@ -2690,7 +3003,7 @@ export function createArt() {
       for (const c0 of colors) {
         const c = col(c0);
         bodySp(c);
-        for (let big = 0; big < 2; big++) for (let st = 0; st < 4; st++) faceSp(LOOKS[c].eyes, big, st);
+        for (let big = 0; big < 2; big++) for (let st = 0; st < FACE_STATES; st++) faceSp(LOOKS[c].eyes, big, st);
         trailSp(c);
       }
       shadowSp();

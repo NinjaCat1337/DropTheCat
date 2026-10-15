@@ -3,7 +3,10 @@
 import { Game } from '../core/rules.js';
 import { getLevel, isHardLevel } from '../core/levels.js';
 import { hint as findHint } from '../core/solver.js';
-import { newProgress, sanitizeProgress, completeLevel, useBooster, buyBooster, markTip, PRICES } from '../core/progress.js';
+import {
+  newProgress, sanitizeProgress, completeLevel, useBooster, buyBooster, buySnack, markTip, PRICES, SNACK_MOVES,
+  starsFor, starThresholds, totalStars, chapterOf, chapterNeed, chapterStars, isPlayable, CHAPTER_SIZE,
+} from '../core/progress.js';
 import { createArt, PALETTE } from './art.js';
 import { createScene } from './scene.js';
 import { createSlide } from './slide.js';
@@ -14,7 +17,8 @@ import { installTouchGuards, onViewportChange, isIOS, isStandalone } from '../pl
 import { KEYS, loadJSON, saveJSON, removeKey, requestPersistence } from '../platform/storage.js';
 import { initServiceWorker } from '../platform/pwa.js';
 
-const VERSION = '1.0';
+const VERSION = '3.0';
+const OVERLAYS = ['#win', '#stuck', '#buy', '#settings', '#starve', '#coins'];
 const UNDO_LIMIT = 80;
 const SAVED_UNDO = 30;
 const WIN_TITLES = ['Purrfect!', 'Meowvelous!', 'Pawsome!', 'Clawsome!', 'Fur-tastic!', 'Hiss-toric!', 'Meow-gical!'];
@@ -25,6 +29,9 @@ const TIPS = [
   { id: 'drag', test: (n) => n === 1, text: 'Drag the hole under the cats of its colour' },
   { id: 'two', test: (n) => n === 2, text: 'Each hole only takes cats of its own colour' },
   { id: 'order', test: (n) => n === 3, text: 'Other cats block the way — clear them first' },
+  { id: 'stars', test: (n) => n === 4, text: 'Fewer moves, more stars: ★★★ for the shortest way' },
+  { id: 'gates', test: (n, d) => Array.isArray(d.gates) && d.gates.length > 0, text: 'A coloured gate lets only a hole of its colour through' },
+  { id: 'hungry', test: (n, d) => d.cats.some((c) => c[3] && c[3].hungry), text: 'Hungry cat! Drop it before its counter runs out' },
   {
     id: 'layers',
     test: (n, d) => d.holes.some((h) => h.next && h.next.length),
@@ -36,9 +43,12 @@ const TIPS = [
   { id: 'lock', test: (n, d) => d.grid.some((r) => r.includes('L')), text: 'Drop the cat with the key to open the crates' },
 ];
 
+const STAR_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 2.2l2.9 6.1 6.6.8-4.9 4.6 1.3 6.6L12 17l-5.9 3.3 1.3-6.6-4.9-4.6 6.6-.8z"/></svg>';
+
 const snapToJSON = (s) => ({
   color: Array.from(s.color), flags: Array.from(s.flags), ice: Array.from(s.ice),
-  hx: Array.from(s.hx), hy: Array.from(s.hy), need: Array.from(s.need), locked: s.locked, dropped: s.dropped,
+  hx: Array.from(s.hx), hy: Array.from(s.hy), need: Array.from(s.need), layer: Array.from(s.layer),
+  locked: s.locked, dropped: s.dropped, moves: s.moves, grace: s.grace,
 });
 
 /**
@@ -89,6 +99,9 @@ export function createApp({ root, nosave = false, debug = false, firstLevel = nu
   let winAt = -1;
   let homeHop = [-1e9, -1e9, -1e9, -1e9, -1e9];
   let hintBusy = false;
+  let pendingWin = false;
+  let shownStars = 3;
+  let lastWin = null;
 
   const now = () => performance.now();
 
@@ -132,12 +145,39 @@ export function createApp({ root, nosave = false, debug = false, firstLevel = nu
     screen = s;
     root.dataset.screen = s;
     if (s === 'home') renderHome();
+    if (s === 'map') renderMap();
     layout();
     wake();
   }
 
   function updateCoins() {
     for (const el of root.querySelectorAll('[data-coins]')) el.textContent = String(progress.coins);
+    const stars = String(totalStars(progress));
+    for (const el of root.querySelectorAll('[data-stars]')) el.textContent = stars;
+    for (const el of root.querySelectorAll('[data-have]')) el.textContent = String(progress.boosters[el.dataset.have] || 0);
+    for (const el of root.querySelectorAll('[data-buy]')) el.disabled = progress.coins < PRICES[el.dataset.buy];
+  }
+
+  // Move counter + the star rating the player would get by finishing right now.
+  function updateMoves() {
+    if (!game || !def) return;
+    const moves = game.moves;
+    const { three, two } = starThresholds(def.par);
+    const rating = starsFor(moves, def.par);
+    $('#moves-num').textContent = String(moves);
+    const stars = $('#moves-stars').children;
+    for (let i = 0; i < 3; i++) {
+      const off = i >= rating;
+      const el = stars[i];
+      if (off && !el.classList.contains('off') && rating < shownStars) {
+        el.classList.add('lost');
+        setTimeout(() => el.classList.remove('lost'), 520);
+      }
+      el.classList.toggle('off', off);
+    }
+    shownStars = rating;
+    $('#moves-goal').textContent = !three ? 'moves' : rating === 3 ? `★★★ ≤ ${three}` : rating === 2 ? `★★ ≤ ${two}` : 'moves';
+    $('#moves').setAttribute('aria-label', `${moves} moves, ${rating} stars so far`);
   }
 
   function updateTools() {
@@ -152,6 +192,7 @@ export function createApp({ root, nosave = false, debug = false, firstLevel = nu
     $('#btn-undo').disabled = undo.length === 0;
     $('#btn-treat').classList.toggle('active', treatMode);
     updateCoins();
+    updateMoves();
   }
 
   function showTip(text, { sticky = false, ms = TIP_MS } = {}) {
@@ -179,7 +220,7 @@ export function createApp({ root, nosave = false, debug = false, firstLevel = nu
 
   // An overlay counts as open from openOverlay() until closeOverlay(), not while it fades out.
   function anyOverlay() {
-    return ['#win', '#stuck', '#buy', '#settings'].some((id) => $(id).dataset.open === '1');
+    return OVERLAYS.some((id) => $(id).dataset.open === '1');
   }
 
   function openOverlay(id) {
@@ -218,13 +259,91 @@ export function createApp({ root, nosave = false, debug = false, firstLevel = nu
       if (i < n) li.classList.add('done');
       if (i === n) li.classList.add('current');
       if (isHardLevel(i) && i >= n) li.classList.add('hard');
-      li.textContent = i < n ? '✓' : String(i);
-      li.setAttribute('aria-label', `Level ${i}${i < n ? ', done' : i === n ? ', next' : ''}`);
+      li.textContent = i < n ? '★'.repeat(progress.stars[i] || 1) : String(i);
+      if (i < n) li.classList.add('stars-' + (progress.stars[i] || 1));
+      li.setAttribute('aria-label', `Level ${i}${i < n ? `, ${progress.stars[i] || 1} stars` : i === n ? ', next' : ''}`);
+      if (i <= n) {
+        li.addEventListener('click', () => {
+          audio.unlock();
+          playOrMap(i);
+        });
+      }
       trail.appendChild(li);
     }
     const play = $('#btn-play');
-    play.textContent = `Level ${n}`;
+    play.textContent = isPlayable(progress, n) ? `Level ${n}` : `🔒 Level ${n}`;
     play.classList.toggle('hard', isHardLevel(n));
+  }
+
+  // Plays level n when it is open, otherwise shows the map with the reason.
+  function playOrMap(n) {
+    if (isPlayable(progress, n)) {
+      click();
+      startLevel(n, { resume: true });
+      return;
+    }
+    audio.play('invalid');
+    setScreen('map');
+    const ch = chapterOf(n);
+    const need = chapterNeed(ch);
+    mapNote(`Chapter ${ch} opens at ${need}★ — you have ${totalStars(progress)}★. Replay levels for more stars!`);
+  }
+
+  function mapNote(text) {
+    const list = $('#map-list');
+    const note = document.createElement('div');
+    note.className = 'chapter-lock map-note';
+    note.textContent = text;
+    list.prepend(note);
+  }
+
+  function renderMap() {
+    updateCoins();
+    const list = $('#map-list');
+    list.textContent = '';
+    const total = totalStars(progress);
+    const last = Math.max(chapterOf(progress.level) + 1, 2);
+    let current = null;
+    for (let ch = 1; ch <= last; ch++) {
+      const need = chapterNeed(ch);
+      const open = total >= need;
+      const box = document.createElement('section');
+      box.className = 'chapter' + (open ? '' : ' closed');
+      const head = document.createElement('div');
+      head.className = 'chapter-head';
+      const first = (ch - 1) * CHAPTER_SIZE + 1;
+      head.innerHTML = `<b>Chapter ${ch}</b><span>★ ${chapterStars(progress, ch)} / ${CHAPTER_SIZE * 3}</span>`;
+      box.appendChild(head);
+      if (!open) {
+        const lock = document.createElement('div');
+        lock.className = 'chapter-lock';
+        lock.textContent = `🔒 Opens at ${need}★ in total — you have ${total}★`;
+        box.appendChild(lock);
+      }
+      const grid = document.createElement('div');
+      grid.className = 'chapter-grid';
+      for (let n = first; n < first + CHAPTER_SIZE; n++) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'lvl';
+        if (isHardLevel(n)) b.classList.add('hard');
+        const reached = n <= progress.level;
+        if (!reached || !open) b.classList.add('locked');
+        if (n === progress.level) {
+          b.classList.add('current');
+          current = b;
+        }
+        const st = progress.stars[n] || 0;
+        b.innerHTML = `<span>${n}</span>` + (st ? `<span class="mini-stars">${[0, 1, 2].map((i) => `<i class="${i < st ? '' : 'off'}">${STAR_SVG}</i>`).join('')}</span>` : '');
+        b.setAttribute('aria-label', `Level ${n}${st ? `, ${st} stars` : ''}${reached && open ? '' : ', locked'}`);
+        if (reached && open) b.addEventListener('click', () => playOrMap(n));
+        else b.disabled = !reached;
+        grid.appendChild(b);
+      }
+      box.appendChild(grid);
+      list.appendChild(box);
+    }
+    if (current) requestAnimationFrame(() => current.scrollIntoView({ block: 'center' }));
   }
 
   function sizeCanvas(c, w, h, dpr) {
@@ -327,13 +446,14 @@ export function createApp({ root, nosave = false, debug = false, firstLevel = nu
     }
   }
 
-  function startLevel(n, { resume = true } = {}) {
+  function startLevel(n, { resume = true, custom = null } = {}) {
     clearTimeout(stuckTimer);
     closeOverlay('#win');
     closeOverlay('#stuck');
+    closeOverlay('#starve');
     levelNo = n;
-    def = getLevel(n);
-    const restored = resume ? restoreLevel(n, def) : null;
+    def = custom || getLevel(n);
+    const restored = resume && !custom ? restoreLevel(n, def) : null;
     game = restored ? restored.game : new Game(def);
     initial = new Game(game.L).snapshot();
     undo = restored ? restored.undo : [];
@@ -342,6 +462,8 @@ export function createApp({ root, nosave = false, debug = false, firstLevel = nu
     treatMode = false;
     scene.setHighlight(false);
     scene.setGame(game);
+    pendingWin = false;
+    shownStars = starsFor(game.moves, def.par);
     $('#level-num').textContent = String(n);
     $('#level-name').setAttribute('aria-label', `Level ${n}`);
     $('#hard-badge').hidden = !isHardLevel(n);
@@ -408,10 +530,36 @@ export function createApp({ root, nosave = false, debug = false, firstLevel = nu
         wantHaptic('medium');
       } else if (e.type === 'win') {
         won1 = true;
+      } else if (e.type === 'layer') {
+        setTimeout(() => audio.play('reveal'), 60);
+        wantHaptic('medium');
+      } else if (e.type === 'hungry') {
+        if (e.left <= 2) {
+          scene.hop(e.x, e.y, t);
+          audio.play('meow', { pitch: 1.45 });
+        }
+      } else if (e.type === 'starve') {
+        onStarve(e);
       }
     }
-    if (won1) onWin();
+    if (won1) {
+      if (drag) pendingWin = true;
+      else onWin();
+    }
     wake();
+  }
+
+  function onStarve(e) {
+    if (won) return;
+    scene.starve(e.x, e.y, now());
+    wantHaptic('heavy');
+    setTimeout(() => {
+      if (screen !== 'game' || won || !game.isFailed()) return;
+      audio.play('stuck');
+      const snack = $('#btn-snack');
+      snack.disabled = false;
+      openOverlay('#starve');
+    }, 650);
   }
 
   function onWin() {
@@ -420,7 +568,11 @@ export function createApp({ root, nosave = false, debug = false, firstLevel = nu
     hideTip();
     scene.setHint(null);
     const hard = isHardLevel(levelNo);
-    const reward = completeLevel(progress, levelNo, hard);
+    const moves = game.moves;
+    const stars = starsFor(moves, def.par);
+    const result = completeLevel(progress, levelNo, hard, stars);
+    const reward = result.coins;
+    lastWin = { n: levelNo, moves, stars, best: result.best };
     removeKey(KEYS.level);
     saveProgress();
     wantHaptic('heavy');
@@ -434,6 +586,14 @@ export function createApp({ root, nosave = false, debug = false, firstLevel = nu
       $('#win .win-sub').textContent = `Level ${levelNo} complete`;
       $('#win .reward').hidden = reward <= 0;
       $('#win .reward-value').textContent = `+${reward}`;
+      const starsEls = $('#win .win-stars').children;
+      for (let i = 0; i < 3; i++) starsEls[i].classList.toggle('on', i < stars);
+      const { three } = starThresholds(def.par);
+      $('#win .win-moves').textContent = `${moves} moves` + (three ? ` · ★★★ ≤ ${three}` : '') +
+        (result.best > stars ? ` · best ${'★'.repeat(result.best)}` : '');
+      $('#btn-replay').hidden = stars >= 3;
+      const next = nextLevel();
+      $('#btn-next').textContent = isPlayable(progress, next) ? 'Next' : 'Levels';
       winAt = t;
       openOverlay('#win');
       setTimeout(() => {
@@ -464,7 +624,12 @@ export function createApp({ root, nosave = false, debug = false, firstLevel = nu
   function afterMove() {
     updateTools();
     saveLevel();
-    if (!won && game.isStuck()) scheduleStuck();
+    if (!won && !game.isFailed() && game.isStuck()) scheduleStuck();
+  }
+
+  // After a win: the next level along the path the player is on (replays continue to the next one).
+  function nextLevel() {
+    return Math.min(levelNo + 1, progress.level);
   }
 
   // ───────── input ─────────
@@ -476,6 +641,7 @@ export function createApp({ root, nosave = false, debug = false, firstLevel = nu
   function onDown(e) {
     interacted = true;
     if (screen !== 'game' || drag || won || anyOverlay() || !scene.layout) return;
+    if (game.isFailed()) return;
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     const p = point(e);
     const c = scene.toCell(p.x, p.y);
@@ -542,6 +708,15 @@ export function createApp({ root, nosave = false, debug = false, firstLevel = nu
       if (undo.length > UNDO_LIMIT) undo.shift();
       if (tipSticky && levelNo > 1) hideTip();
       else if (tipSticky && game.need[d.k] <= 0) hideTip();
+      const events = game.endMove();
+      $('#moves').classList.remove('bump');
+      void $('#moves').offsetWidth;
+      $('#moves').classList.add('bump');
+      if (events.length) process(events);
+    }
+    if (pendingWin) {
+      pendingWin = false;
+      onWin();
     }
     afterMove();
   }
@@ -576,6 +751,7 @@ export function createApp({ root, nosave = false, debug = false, firstLevel = nu
     if (drag || !undo.length || !game) return;
     clearTimeout(stuckTimer);
     closeOverlay('#stuck');
+    closeOverlay('#starve');
     game.restore(undo.pop());
     won = false;
     scene.sync(now());
@@ -588,6 +764,7 @@ export function createApp({ root, nosave = false, debug = false, firstLevel = nu
     if (drag || !game) return;
     clearTimeout(stuckTimer);
     closeOverlay('#stuck');
+    closeOverlay('#starve');
     const atStart = game.stateKey() === new Game(game.L).stateKey();
     if (atStart) {
       scene.intro(now());
@@ -612,7 +789,7 @@ export function createApp({ root, nosave = false, debug = false, firstLevel = nu
       openBuy('hint');
       return;
     }
-    if (hintBusy) return;
+    if (hintBusy || game.isFailed()) return;
     if (game.isStuck()) {
       scheduleStuck();
       return;
@@ -630,7 +807,9 @@ export function createApp({ root, nosave = false, debug = false, firstLevel = nu
       const h = findHint(game, { maxNodes: 20000, timeMs: 1500 });
       if (!h) {
         audio.play('invalid');
-        showTip('No way forward from here — try Undo or Restart', { ms: 4000 });
+        const hungry = def.cats.some((c) => c[3] && c[3].hungry);
+        showTip(hungry ? 'The hungry cat can’t be reached in time — Undo, Restart or give it a Snack'
+          : 'No way forward from here — try Undo or Restart', { ms: 4500 });
         return;
       }
       hideTip();
@@ -682,13 +861,27 @@ export function createApp({ root, nosave = false, debug = false, firstLevel = nu
     scene.setHighlight(false);
     hideTip();
     audio.play('treat');
+    game.endMove(events);
     process(events);
     saveProgress();
     afterMove();
   }
 
+  function openCoins(highlight) {
+    updateCoins();
+    for (const row of root.querySelectorAll('#coins .shop-row')) {
+      const kind = row.querySelector('[data-buy]').dataset.buy;
+      row.classList.toggle('wanted', kind === highlight);
+    }
+    openOverlay('#coins');
+  }
+
   let buyKind = 'hint';
   function openBuy(kind) {
+    if (kind === 'hint' || kind === 'treat') {
+      openCoins(kind);
+      return;
+    }
     buyKind = kind;
     const price = PRICES[kind];
     const can = progress.coins >= price;
@@ -732,8 +925,64 @@ export function createApp({ root, nosave = false, debug = false, firstLevel = nu
   }
 
   on('#btn-play', () => {
+    playOrMap(progress.level);
+  });
+  on('#btn-levels', () => {
     click();
-    startLevel(progress.level);
+    setScreen('map');
+  });
+  on('#btn-map-back', () => {
+    click();
+    setScreen('home');
+  });
+  on('#btn-coins', () => {
+    click();
+    openCoins(null);
+  });
+  on('#btn-coins-close', () => {
+    click();
+    closeOverlay('#coins');
+  });
+  for (const el of root.querySelectorAll('[data-buy]')) {
+    el.addEventListener('click', () => {
+      audio.unlock();
+      const kind = el.dataset.buy;
+      if (buyBooster(progress, kind)) {
+        audio.play('coin');
+        haptics.impact('medium');
+        saveProgress();
+        updateTools();
+      } else {
+        audio.play('invalid');
+      }
+    });
+  }
+  on('#btn-starve-undo', () => {
+    click();
+    doUndo();
+  });
+  on('#btn-starve-restart', () => {
+    click();
+    doRestart();
+  });
+  on('#btn-snack', () => {
+    if (!game || !game.isFailed()) return;
+    if (!buySnack(progress)) {
+      audio.play('invalid');
+      closeOverlay('#starve');
+      openCoins(null);
+      return;
+    }
+    game.feed(SNACK_MOVES);
+    audio.play('treat');
+    saveProgress();
+    closeOverlay('#starve');
+    afterMove();
+    wake();
+  });
+  on('#btn-replay', () => {
+    click();
+    startLevel(levelNo, { resume: false });
   });
   on('#btn-home', () => {
     click();
@@ -760,8 +1009,14 @@ export function createApp({ root, nosave = false, debug = false, firstLevel = nu
     doTreat();
   });
   on('#btn-next', () => {
-    click();
-    startLevel(progress.level, { resume: false });
+    const next = nextLevel();
+    if (isPlayable(progress, next)) {
+      click();
+      startLevel(next, { resume: true });
+    } else {
+      closeOverlay('#win');
+      playOrMap(next);
+    }
   });
   on('#btn-stuck-undo', () => {
     click();
@@ -815,6 +1070,7 @@ export function createApp({ root, nosave = false, debug = false, firstLevel = nu
   on('#btn-reset-yes', () => {
     click();
     progress = newProgress();
+    levelNo = 1;
     removeKey(KEYS.level);
     saveProgress();
     game = null;
@@ -834,7 +1090,7 @@ export function createApp({ root, nosave = false, debug = false, firstLevel = nu
     });
   }
   // Backdrop taps close the dismissible dialogs.
-  for (const id of ['#buy', '#settings']) {
+  for (const id of ['#buy', '#settings', '#coins']) {
     $(id).addEventListener('click', (e) => {
       if (e.target === $(id)) closeOverlay(id);
     });
@@ -934,7 +1190,9 @@ export function createApp({ root, nosave = false, debug = false, firstLevel = nu
       return {
         screen, level: levelNo, won, undo: undo.length, coins: progress.coins, boosters: { ...progress.boosters },
         audio: audio.state, catsLeft: game ? game.catsLeft() : 0, stuck: game ? game.isStuck() : false,
-        overlay: ['#win', '#stuck', '#buy', '#settings'].filter((id) => $(id).dataset.open === '1'),
+        overlay: OVERLAYS.filter((id) => $(id).dataset.open === '1'),
+        moves: game ? game.moves : 0, stars: totalStars(progress), failed: game ? game.isFailed() : false,
+        par: def ? def.par : undefined, lastWin,
       };
     },
     /** Board geometry for tests: the CSS px centre of cell (x, y). */

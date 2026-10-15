@@ -112,13 +112,15 @@ try {
   console.log('PASS level 1 by touch, win card, next level');
 
   // Every stored solution of the first levels wins through the real input path.
-  for (let n = 2; n <= 12; n++) {
+  for (const n of [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 18, 28, 50]) {
     await play(page, n);
     await replaySolution(page, cdp);
     await page.waitForFunction(() => window.__dropcat.state().won, null, { timeout: 5000 });
+    const w = await page.evaluate(() => window.__dropcat.state());
+    if (w.par) assert.equal(w.lastWin.stars, 3, `level ${n}: the stored solution (${w.lastWin.moves} drags) earns 3 stars (par ${w.par})`);
     if (n === 12) await page.screenshot({ path: path.join(out, 'level-12-won.png') });
   }
-  console.log('PASS levels 2–12 replayed by touch');
+  console.log('PASS levels 2–12, 18, 28, 50 replayed by touch, each for 3 stars');
 
   // Undo and restart.
   await play(page, 6);

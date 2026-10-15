@@ -57,10 +57,16 @@ function staticCover(L, k) {
   const { cells, axis, bw, bh } = hole;
   const cover = new Uint8Array(n);
   const seen = new Uint8Array(n);
+  // Gates of other colours are walls for good (gate colours belong to single-layer holes, so a layered hole
+  // never matches one).
+  const gate = L.gate || null;
+  const mine = hole.layers && hole.layers.length === 1 ? hole.layers[0].c : -2;
   const fits = (x, y) => {
     for (const [dx, dy] of cells) {
-      const g = ground[(y + dy) * w + x + dx];
+      const i = (y + dy) * w + x + dx;
+      const g = ground[i];
       if (g !== FLOOR && g !== LOCK) return false;
+      if (gate && gate[i] !== -1 && gate[i] !== mine) return false;
     }
     return true;
   };
@@ -408,17 +414,22 @@ export class Explorer {
     const isIn = new Uint8Array(g.need.length);
     for (const k of H) isIn[k] = 1;
     const mh = H.length;
-    // Static per-cell data: cells every hole may slide over, and per hole the cats it could take right now.
-    const free = new Uint8Array(n);
-    for (let i = 0; i < n; i++) free[i] = g.color[i] === -1 && g.cellOpen(-1, i) ? 1 : 0;
+    // Static per-hole data: empty cells it may slide over (gates!) and the cats it could take right now.
+    const freeOf = [];
     const food = [];
     const maxX = [];
     const maxY = [];
     const axes = [];
     for (const k of H) {
       const c = g.holeColor(k);
+      const fr = new Uint8Array(n);
       const f = new Uint8Array(n);
-      for (let i = 0; i < n; i++) if (g.color[i] === c && g.cellOpen(c, i)) f[i] = 1;
+      for (let i = 0; i < n; i++) {
+        if (!g.cellOpen(c, i)) continue;
+        if (g.color[i] === -1) fr[i] = 1;
+        else if (g.color[i] === c) f[i] = 1;
+      }
+      freeOf.push(fr);
       food.push(f);
       maxX.push(w - L.holes[k].bw);
       maxY.push(h - L.holes[k].bh);
@@ -431,6 +442,7 @@ export class Explorer {
     const corridor = [];
     for (let a = 0; a < nc; a++) {
       const offs = this.offs[H[a]];
+      const free = freeOf[a];
       const fits = (q, wantFood) => {
         let eats = false;
         for (const o of offs) {
@@ -569,6 +581,7 @@ export class Explorer {
       for (let a = 0; a < mh; a++) {
         const offs = this.offs[H[a]];
         const fd = food[a];
+        const free = freeOf[a];
         const p = cfg[a];
         const px = p % w;
         const py = (p - px) / w;
@@ -623,7 +636,7 @@ export class Explorer {
    * nothing) to a position from which some other hole can reach a target it could not reach before.
    * @param {number} perPair how many positions to try to keep per (blocker, blocked) pair
    */
-  unblockMoves(g, scans = null, perPair = 2) {
+  unblockMoves(g, scans = null, perPair = 2, only = -1) {
     const L = this.L;
     const { w } = L;
     const m = g.need.length;
@@ -641,7 +654,7 @@ export class Explorer {
       const cellsK = new Set();
       for (const list of [free.region, free.targets]) for (const p of list) for (const o of this.offs[k]) cellsK.add(p + o);
       for (let j = 0; j < m; j++) {
-        if (j === k || g.need[j] <= 0) continue;
+        if (j === k || g.need[j] <= 0 || (only >= 0 && j !== only)) continue;
         let blocks = false;
         for (const o of this.offs[j]) if (cellsK.has(g.hy[j] * w + g.hx[j] + o)) blocks = true;
         if (!blocks) continue;
@@ -959,6 +972,11 @@ function searchOnce(ex, root, budget, rng, deadline, tr) {
  *   the budget (or none exists)
  */
 export function solve(game, opts = {}) {
+  if (hasHungry(game)) return solveHungry(game, opts);
+  return solvePlain(game, opts);
+}
+
+function solvePlain(game, opts) {
   const maxNodes = Math.max(1, opts.maxNodes ?? 50000);
   const deadline = opts.timeMs ? now() + opts.timeMs : Infinity;
   const ex = explorer(game.L);
@@ -985,4 +1003,204 @@ export function solve(game, opts = {}) {
 export function hint(game, opts = {}) {
   const r = solve(game, opts);
   return r && r.moves.length ? r.moves[0] : null;
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Drags: par and hungry cats
+// ---------------------------------------------------------------------------------------------------------
+
+/** True when hungry cats are still on the board. */
+export function hasHungry(g) {
+  const hungry = g.L.cat0.hungry;
+  if (!hungry) return false;
+  for (const i of g.L.catCells) if (hungry[i] && g.color[i] !== -1) return true;
+  return false;
+}
+
+/**
+ * The ways one drag of hole k can end: [{ game, path }]. Within a drag a hole eats whatever it reaches on its
+ * way, so the outcomes are the stops of a greedy eating walk (nearest cat first, and a few other first bites),
+ * plus slides aside that let another hole eat (without eating, or at the end of the walk).
+ */
+function dragOutcomes(ex, base, k, firstBites) {
+  const out = [];
+  const seen = new Set();
+  const add = (game, path) => {
+    if (!path) return;
+    const key = game.stateKey();
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({ game, path });
+  };
+  const walk = (start, path0) => {
+    let g = start;
+    let path = path0;
+    for (let guard = 0; guard < 80 && g.need[k] > 0; guard++) {
+      const sc = ex.scan(g, k);
+      if (!sc.targets.length) break;
+      const p = ex.pathTo(sc, sc.targets[0]);
+      const t = g.clone();
+      if (!applyPath(t, k, p)) break;
+      path += p;
+      g = t;
+      add(g, path);
+    }
+    return { game: g, path };
+  };
+  const first = ex.scan(base, k);
+  const ends = [walk(base, '')];
+  for (let i = 1; i < Math.min(first.targets.length, firstBites + 1); i++) {
+    const p = ex.pathTo(first, first.targets[i]);
+    const t = base.clone();
+    if (!applyPath(t, k, p)) continue;
+    add(t, p);
+    ends.push(walk(t, p));
+  }
+  for (const e of [{ game: base, path: '' }, ends[0]]) {
+    if (e.game.need[k] <= 0) continue;
+    for (const mv of ex.unblockMoves(e.game, null, 1, k)) add(mv.game, e.path + mv.path);
+  }
+  return out;
+}
+
+/**
+ * Lower is better: fewer cats and holes left, more holes able to eat; hungry cats count by how soon they are
+ * due and how far their hole is from taking them (in their colour and able to reach them now, or not).
+ */
+function dragScore(ex, g) {
+  let open = 0;
+  let able = 0;
+  const scans = [];
+  for (let k = 0; k < g.need.length; k++) {
+    if (g.need[k] <= 0) continue;
+    open++;
+    scans[k] = ex.scan(g, k);
+    if (scans[k].targets.length) able++;
+  }
+  let urgency = 0;
+  const hungry = g.L.cat0.hungry;
+  if (hungry) {
+    for (const i of g.L.catCells) {
+      if (!hungry[i] || g.color[i] === -1) continue;
+      const c = g.color[i];
+      let cost = 3;
+      for (const k of ex.holesOf[c]) {
+        if (g.need[k] <= 0) continue;
+        if (g.holeColor(k) !== c) cost = 2;
+        else if (scans[k] && scans[k].targets.some((q) => ex.offs[k].some((o) => q + o === i))) cost = 0;
+        else cost = 1;
+      }
+      urgency += ((cost + 1) * 12) / Math.max(1, hungry[i] + (g.grace || 0) - g.moves);
+    }
+  }
+  return g.catsLeft() * 2 + open * 3 - able * 1.5 + urgency;
+}
+
+/**
+ * Beam search over whole drags (a drag = one hole's continuous movement, counted once by the UI). Looks for
+ * the fewest drags that reach the goal (default: the win). After every drag the move is counted
+ * (game.endMove) and states where a hungry cat starved are dropped, so deadlines hold from game.moves on.
+ * @param {import('./rules.js').Game} game the current state (not modified)
+ * @param {{ beam?: number, maxDrags?: number, firstBites?: number, goal?: (g: object) => boolean }} [opts]
+ * @returns {{ moves: { hole: number, path: string }[], drags: number } | null}
+ */
+export function minDrags(game, opts = {}) {
+  const beam = opts.beam ?? 24;
+  const maxDrags = opts.maxDrags ?? 150;
+  const firstBites = opts.firstBites ?? 2;
+  const goal = opts.goal || ((g) => g.isWon());
+  const ex = explorer(game.L);
+  const start = game.clone();
+  if (goal(start)) return { moves: [], drags: 0 };
+  if (start.isFailed()) return null;
+  const visited = new Set([start.stateKey() + '|-1']);
+  let layer = [{ g: start, moves: [], last: -1 }];
+  for (let d = 1; d <= maxDrags && layer.length; d++) {
+    const next = [];
+    const keep = (g, moves, last) => {
+      const key = g.stateKey() + '|' + last;
+      if (visited.has(key)) return;
+      visited.add(key);
+      next.push({ g, moves, last, score: dragScore(ex, g) });
+    };
+    for (const node of layer) {
+      let eats = false;
+      const kids = [];
+      for (let k = 0; k < node.g.need.length; k++) {
+        if (node.g.need[k] <= 0 || k === node.last) continue;
+        for (const o of dragOutcomes(ex, node.g, k, firstBites)) {
+          if (o.game.catsLeft() < node.g.catsLeft()) eats = true;
+          kids.push({ k, ...o });
+        }
+      }
+      if (!eats) {
+        // Nobody can eat: the first drag of the shortest unstall sequence. When it moves the hole of the last
+        // drag, it is the rest of that drag (no new move is counted).
+        const seq = ex.unstall(node.g);
+        if (seq && seq.length) {
+          const [k1, p1] = mergeMoves(seq)[0];
+          const t = node.g.clone();
+          if (applyPath(t, k1, p1)) {
+            if (k1 !== node.last) kids.push({ k: k1, game: t, path: p1 });
+            else {
+              const moves = node.moves.slice(0, -1).concat([{ hole: k1, path: node.moves[node.moves.length - 1].path + p1 }]);
+              if (goal(t) && !t.isFailed()) return { moves, drags: moves.length };
+              keep(t, moves, k1);
+            }
+          }
+        }
+      }
+      for (const kid of kids) {
+        const g = kid.game;
+        g.endMove(null);
+        const moves = node.moves.concat([{ hole: kid.k, path: kid.path }]);
+        if (goal(g) && !g.isFailed()) return { moves, drags: moves.length };
+        if (g.isFailed()) continue;
+        keep(g, moves, kid.k);
+      }
+    }
+    next.sort((a, b) => a.score - b.score);
+    layer = next.slice(0, beam);
+  }
+  return null;
+}
+
+/** The drags win from game with endMove() after each and no hungry cat starving on the way. */
+function winsInTime(game, line) {
+  const t = game.clone();
+  for (const [k, path] of line) {
+    if (!applyPath(t, k, path)) return false;
+    t.endMove(null);
+    if (t.isFailed()) return false;
+  }
+  return t.isWon();
+}
+
+/**
+ * Levels with hungry cats: first eat every hungry cat in time (drag search with deadlines, from the live
+ * move counter), then the plain search finishes (no deadlines left, no dead ends). When the drag search finds
+ * nothing, the plain solver's line is taken if it happens to feed every hungry cat in time.
+ */
+function solveHungry(game, opts) {
+  let p1 = null;
+  for (const beam of opts.beam ? [opts.beam] : [16, 64, 192]) {
+    p1 = minDrags(game, { beam, goal: (g) => !hasHungry(g), maxDrags: 60 });
+    if (p1) break;
+  }
+  if (!p1) {
+    const r = solvePlain(game, opts);
+    if (!r) return null;
+    const line = mergeMoves(r.moves.map((mv) => [mv.hole, mv.path]));
+    return winsInTime(game, line) ? { moves: line.map(([hole, path]) => ({ hole, path })), nodes: r.nodes } : null;
+  }
+  const mid = game.clone();
+  for (const mv of p1.moves) {
+    if (!applyPath(mid, mv.hole, mv.path)) return null;
+    mid.endMove(null);
+  }
+  if (mid.isFailed()) return null;
+  const rest = mid.isWon() ? { moves: [], nodes: 0 } : solvePlain(mid, opts);
+  if (!rest) return null;
+  const all = mergeMoves([...p1.moves, ...rest.moves].map((mv) => [mv.hole, mv.path]));
+  return { moves: all.map(([hole, path]) => ({ hole, path })), nodes: (rest.nodes || 0) + p1.drags };
 }

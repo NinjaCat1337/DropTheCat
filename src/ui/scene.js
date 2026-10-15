@@ -15,6 +15,7 @@ const MELT_MS = 480;
 const UNLOCK_MS = 600;
 const APPEAR_MS = 420;
 const LAYER_MS = 560;
+const STARVE_MS = 900;
 const TRAIL_MS = 520;
 
 const TAU = Math.PI * 2;
@@ -39,6 +40,7 @@ export function createScene(canvas, art) {
   let layerFx = [];
   let trails = [];
   let lastPos = [];
+  const bubbles = [];
 
   const fxOf = (i) => {
     let e = fx.get(i);
@@ -291,6 +293,7 @@ export function createScene(canvas, art) {
 
   function drawCats(now) {
     const t = now / 1000;
+    bubbles.length = 0;
     const { w } = game;
     const happyColor = drag ? game.holeColor(drag.k) : -1;
     for (const i of game.L.catCells) {
@@ -333,8 +336,18 @@ export function createScene(canvas, art) {
         else delete e.hop;
       }
       const frozen = game.ice[i] > 0;
-      const mood = !frozen && c === happyColor ? 'happy' : 'idle';
-      art.drawCat(ctx, cx, cy, c, { t, seed: i, mood, hop, scale, key: (game.flags[i] & 2) !== 0 });
+      const hunger = game.hungerAt(x, y);
+      let mood = !frozen && c === happyColor ? 'happy' : hunger !== null ? 'hungry' : 'idle';
+      let sx = cx;
+      if (e && e.starve !== undefined) {
+        const p = (now - e.starve) / STARVE_MS;
+        if (p < 1) {
+          sx += Math.sin(p * 40) * L.cell * 0.07 * (1 - p);
+          mood = 'angry';
+        } else delete e.starve;
+      }
+      art.drawCat(ctx, sx, cy, c, { t, seed: i, mood, hop, scale, key: (game.flags[i] & 2) !== 0 });
+      if (hunger !== null) bubbles.push([sx, cy, Math.max(0, hunger)]);
       if (frozen) {
         let crack = 0;
         if (e && e.crack !== undefined) {
@@ -349,6 +362,60 @@ export function createScene(canvas, art) {
         else delete e.melt;
       }
     }
+  }
+
+  function drawGates(now) {
+    if (!game.L.hasGates) return;
+    const { w, n, gate } = game.L;
+    const t = now / 1000;
+    for (let i = 0; i < n; i++) {
+      const c = gate[i];
+      if (c === -1) continue;
+      const x = i % w;
+      const y = (i - x) / w;
+      const k = game.holeAt[i];
+      const active = k !== -1 && game.holeColor(k) === c ? 1 : 0;
+      if (typeof art.drawGate === 'function') {
+        art.drawGate(ctx, px(x), py(y), c, { t, active });
+        continue;
+      }
+      // Fallback: a tinted tile with a thick frame in the gate colour.
+      ctx.save();
+      ctx.globalAlpha = 0.35;
+      ctx.fillStyle = PALETTE[c].light;
+      roundRect(ctx, px(x) + 3, py(y) + 3, L.cell - 6, L.cell - 6, L.cell * 0.16);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.lineWidth = Math.max(2, L.cell * 0.08);
+      ctx.strokeStyle = PALETTE[c].main;
+      ctx.setLineDash([L.cell * 0.14, L.cell * 0.08]);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  function drawHungerBubble(cx, cy, left, t) {
+    if (typeof art.drawHungry === 'function') {
+      art.drawHungry(ctx, cx, cy, left, { t, urgent: left <= 2 });
+      return;
+    }
+    const r = L.cell * 0.2;
+    const bx = cx + L.cell * 0.3;
+    const by = cy - L.cell * 0.3;
+    ctx.save();
+    ctx.fillStyle = left <= 2 ? '#FF4D5E' : '#FFFFFF';
+    ctx.strokeStyle = '#3A2763';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(bx, by, r, 0, TAU);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = left <= 2 ? '#FFFFFF' : '#3A2763';
+    ctx.font = `900 ${Math.round(r * 1.2)}px Nunito, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(String(left), bx, by + 1);
+    ctx.restore();
   }
 
   function drawCrates(now) {
@@ -502,6 +569,10 @@ export function createScene(canvas, art) {
     hop(x, y, now) {
       fxOf(y * game.w + x).hop = now;
     },
+    /** A hungry cat waited too long: it shakes in surprise. */
+    starve(x, y, now) {
+      fxOf(y * game.w + x).starve = now;
+    },
     /** Level intro: every cat pops in, in a diagonal wave. */
     intro(now) {
       const { w } = game;
@@ -587,11 +658,13 @@ export function createScene(canvas, art) {
       if (!board) board = art.renderBoard({ w: game.w, h: game.h, ground: game.L.ground });
       const m = art.boardMargin;
       ctx.drawImage(board, L.x - m, L.y - m, game.w * L.cell + 2 * m, game.h * L.cell + 2 * m);
+      drawGates(now);
       drawCrates(now);
       drawHoles(now, dt);
       drawFalling(now);
       drawCats(now);
       drawBadges(now);
+      for (const [bx, by, left] of bubbles) drawHungerBubble(bx, by, left, now / 1000);
       drawHint(now);
       particles.draw(ctx, now, dt);
     },

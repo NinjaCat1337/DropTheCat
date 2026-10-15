@@ -1,9 +1,9 @@
 # DropTheCat — Meow Drop
 
 A cozy cat puzzle inspired by *Drop the Cat*: slide the coloured holes under the cats of the same colour
-and drop them all in. There is **no timer and no move limit**, so take your time, meow. Undo and Restart
-are always free. This installable web app (PWA) is designed for iPhone and also works on desktop and
-Android. Once loaded, it can run offline.
+and drop them all in. There is **no timer**: the challenge is finding a short way through a packed board.
+Undo and Restart are always free. This installable web app (PWA) is designed for iPhone and also works on
+desktop and Android. Once loaded, it can run offline.
 
 **Play:** https://ninjacat1337.github.io/DropTheCat/
 
@@ -14,16 +14,24 @@ Android. Once loaded, it can run offline.
 - A cat drops into a hole of its own colour as soon as the hole covers it.
 - The number on a hole is how many cats it still needs (as many as the hole has cells). A full hole closes
   and frees its space, which makes room for the others: find the right order and shuffle holes aside.
-- Every colour has exactly one hole, so a level can never get stuck: there are no dead ends.
-- **Layers:** a hole with a coloured ring turns that colour once it is full and then needs those cats.
+- Every colour has exactly one hole, so a board never gets stuck: there are no dead ends.
+- **Stars:** every drag is a move. Finish within the level's best known number of moves for ★★★, a little
+  more for ★★, any finish for ★. Levels come in chapters of 20; a chapter opens once you have enough stars
+  in total, so replay levels from **All levels** to collect more.
 - New things appear along the way:
-  - **Ice:** a frozen cat blocks everything until the shown number of other cats has dropped.
-  - **Boxes:** a box hides a cat and opens when a cat next to it drops.
-  - **Arrows:** a hole with arrows slides only that way.
-  - **Crates and key:** crates block the way until the cat wearing the key drops.
-- Every 10th level is a **Hard** level and gives more coins.
-- **Hint** shows a good next move. **Treat** calls the nearest cats of a hole's colour right into it.
-  Both cost coins once your free ones are used up. Coins come from finished levels.
+  - **Layers** (7): a hole with a coloured ring turns that colour once it is full and needs those cats too.
+  - **Walls** (11) with narrow gaps, and **5-cell holes** (12).
+  - **Ice** (15): a frozen cat blocks everything until the shown number of other cats has dropped.
+  - **Coloured gates** (18): only a hole of the gate's colour may pass.
+  - **Boxes** (25): a box hides a cat and opens when a cat next to it drops.
+  - **Hungry cats** (28): drop it before its counter of moves runs out, or it runs off (Undo, Restart, or
+    a Snack for 3 more moves).
+  - **Arrows** (35): a hole with arrows slides only that way.
+  - **Crates and key** (45): crates block the way until the cat wearing the key drops.
+- Every 10th level is a **Hard** level.
+- **Coins:** +10 for every new level, +25 for a Hard one, +5 for every new star. Spend them on **Hint**
+  (shows a good next move), **Treat** (the nearest cats of a hole's colour jump right in) and **Snacks**.
+  Tap the coins on the home screen to see all this in the game.
 
 ## Run locally
 

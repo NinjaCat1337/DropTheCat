@@ -97,13 +97,16 @@ const CATS = [
   [4, 3, 6], [0, 4, 2], [1, 4, 5], [2, 4, 8], [4, 4, 7], [0, 5, 9], [1, 5, 7], [2, 5, 6], [4, 5, 7],
   [1, 6, 2], [1, 7, 9], [4, 7, 11], [2, 3, 10, { box: true }],
 ];
-const TRAILS = [[1, 0, 0, 0.45], [3, 4, 8, 0.5]];
+const TRAILS = [[2, 3, 8, 0.5]];
+const GATES = [[1, 0, 0], [3, 4, 2]];
+const HUNGRY = { '0,1': 5, '4,4': 1 };
 
 function drawBoardScene(t, ctx, bx, by, level, opts = {}) {
   const { w, h, ground } = level;
   const board = opts.board || art.renderBoard(level);
   const m = art.boardMargin;
   ctx.drawImage(board, bx - m, by - m, w * cell + 2 * m, h * cell + 2 * m);
+  for (const [x, y, c] of GATES) art.drawGate(ctx, bx + x * cell, by + y * cell, c, { t });
   for (let i = 0; i < w * h; i++) if (ground[i] === 3) art.drawCrate(ctx, bx + (i % w) * cell, by + Math.floor(i / w) * cell, { t });
   for (const [x, y, c, a] of TRAILS) art.drawTrail(ctx, bx + x * cell, by + y * cell, c, a);
   for (const H of HOLES) {
@@ -121,10 +124,15 @@ function drawBoardScene(t, ctx, bx, by, level, opts = {}) {
       art.drawBox(ctx, cx, cy, { t, seed: x * 7 + y });
       continue;
     }
-    const happy = c === 8;
-    art.drawCat(ctx, cx, cy, c, { t: t + (x * 5 + y) * 0.37, seed: y * w + x, mood: happy ? 'happy' : 'idle', key: !!(extra && extra.key) });
+    const hungry = HUNGRY[x + ',' + y];
+    const mood = hungry ? 'hungry' : c === 8 ? 'happy' : 'idle';
+    art.drawCat(ctx, cx, cy, c, { t: t + (x * 5 + y) * 0.37, seed: y * w + x, mood, key: !!(extra && extra.key) });
   }
   for (const H of HOLES) art.drawHoleBadge(ctx, H.cells, bx + H.x * cell, by + H.y * cell, H.c, H.need);
+  for (const [k, left] of Object.entries(HUNGRY)) {
+    const [x, y] = k.split(',').map(Number);
+    art.drawHungry(ctx, bx + (x + 0.5) * cell, by + (y + 0.5) * cell, left, { t });
+  }
 }
 
 function sceneBoard() {
@@ -175,6 +183,31 @@ function sceneSheet() {
     art.drawHole(ctx, [[0, 0]], x, y, 6, { need: 3, change: i ? ch : 0, prev: i ? 8 : undefined, t: T, badge: false });
     art.drawHoleBadge(ctx, [[0, 0]], x, y, 6, 3, { change: i ? ch : 0 });
   });
+  strip('gates', 'gates: 12 colours; red active 0.5 / 1', 14, (ctx, x, y, i) => {
+    if (i < 12) art.drawGate(ctx, x, y, i, { t: T + i * 0.31 });
+    else art.drawGate(ctx, x, y, 0, { t: T, active: i === 12 ? 0.5 : 1 });
+  });
+  strip('hungry', 'hungry cats: left 9, 5, 3, 2 (urgent), 1 (urgent); angry; red hole passing a red gate', 8, (ctx, x, y, i) => {
+    const cx = x + cell / 2;
+    const cy = y + cell / 2;
+    if (i < 5) {
+      const c = [3, 7, 1, 5, 8][i];
+      art.drawCat(ctx, cx, cy, c, { t: T + i, seed: 30 + i, mood: 'hungry' });
+    } else if (i < 7) art.drawCat(ctx, cx, cy, [6, 10][i - 5], { t: T, seed: 2, mood: 'angry' });
+    else {
+      art.drawGate(ctx, x, y, 0, { t: T, active: 1 });
+      art.drawHole(ctx, [[0, 0]], x, y, 0, { need: 2, t: T, lifted: 1 });
+    }
+  });
+  if (!onlyRows || onlyRows.includes('hungry')) {
+    // bubbles go on top of everything (redraw over the strip just added)
+    const cv = root.lastElementChild;
+    const ctx = cv.getContext('2d');
+    const m = art.boardMargin;
+    const bx = 4 + m;
+    const by = 4 + m;
+    [9, 5, 3, 2, 1].forEach((left, i) => art.drawHungry(ctx, bx + (i + 0.5) * cell, by + cell / 2, left, { t: T }));
+  }
   strip('trail', 'trails: red .55 / .3 / .1, white .55, purple .55, blue .3', 6, (ctx, x, y, i) => {
     const t = [[0, 0.55], [0, 0.3], [0, 0.1], [8, 0.55], [6, 0.55], [5, 0.3]][i];
     art.drawTrail(ctx, x, y, t[0], t[1]);
@@ -227,6 +260,40 @@ function sceneSheet() {
     '...##.L.',
     '.._..__.',
   ]);
+  // pentominoes (5-cell holes, 3 × 3 boxes), some with layer rings
+  if (!onlyRows || onlyRows.includes('pento')) {
+    label('pento: the 12 pentominoes (rings on U, X, W, N)');
+    const level = parseGrid(Array(11).fill('...............'));
+    const m = art.boardMargin;
+    const pad = 4;
+    const W = level.w * cell + 2 * m + 2 * pad;
+    const H = level.h * cell + 2 * m + 2 * pad;
+    const { c, ctx } = canvasCss(W, H);
+    root.append(c);
+    const bx = pad + m;
+    const by = pad + m;
+    ctx.drawImage(art.renderBoard(level), bx - m, by - m, level.w * cell + 2 * m, level.h * cell + 2 * m);
+    const P5 = {
+      F: [[1, 0], [2, 0], [0, 1], [1, 1], [1, 2]],
+      T: [[0, 0], [1, 0], [2, 0], [1, 1], [1, 2]],
+      U: [[0, 0], [2, 0], [0, 1], [1, 1], [2, 1]],
+      X: [[1, 0], [0, 1], [1, 1], [2, 1], [1, 2]],
+      V: [[0, 0], [0, 1], [0, 2], [1, 2], [2, 2]],
+      W: [[0, 0], [0, 1], [1, 1], [1, 2], [2, 2]],
+      Z: [[0, 0], [1, 0], [1, 1], [1, 2], [2, 2]],
+      P: [[0, 0], [1, 0], [0, 1], [1, 1], [0, 2]],
+      I: [[0, 0], [1, 0], [2, 0], [3, 0], [4, 0]],
+      L: [[0, 0], [1, 0], [2, 0], [3, 0], [0, 1]],
+      N: [[0, 0], [1, 0], [2, 0], [2, 1], [3, 1]],
+      Y: [[0, 0], [1, 0], [2, 0], [3, 0], [1, 1]],
+    };
+    const place = [
+      ['F', 0, 0, 0, 5], ['T', 4, 0, 2, 5], ['U', 8, 0, 4, 5, [8]], ['X', 12, 0, 6, 5, [2, 5]],
+      ['V', 0, 4, 3, 5], ['W', 4, 4, 7, 5, [0]], ['Z', 8, 4, 9, 5], ['P', 12, 4, 1, 5],
+      ['I', 0, 8, 5, 5], ['L', 6, 8, 10, 5], ['N', 11, 8, 11, 5, [7, 3]], ['Y', 0, 9, 8, 5],
+    ];
+    for (const [nm, x, y, col, need, next] of place) art.drawHole(ctx, P5[nm], bx + x * cell, by + y * cell, col, { need, next: next || [], t: T });
+  }
   // shapes
   if (!onlyRows || onlyRows.includes('shapes')) {
     label('shapes: hole shapes (axis h / v on some), tag on the last cell');
