@@ -122,6 +122,19 @@ try {
   }
   console.log('PASS levels 2–12, 18, 28, 50 replayed by touch, each for 3 stars');
 
+  // Tapping something on the board explains it.
+  await play(page, 18);
+  const gateAt = await page.evaluate(() => {
+    const [x, y] = window.__dropcat.def.gates[0];
+    return window.__dropcat.cellCenter(x, y);
+  });
+  await page.mouse.click(gateAt.x, gateAt.y);
+  await page.waitForFunction(() => {
+    const tip = document.querySelector('#tip');
+    return !tip.hidden && /only the \w+ hole can pass/.test(tip.textContent);
+  });
+  console.log('PASS tapping a gate explains it');
+
   // Undo and restart.
   await play(page, 6);
   const fresh = await page.evaluate(() => window.__dropcat.game.stateKey());
@@ -183,6 +196,29 @@ try {
   await page.locator('#btn-settings-close').click({ force: true });
   await page.locator('#settings').waitFor({ state: 'hidden' });
   console.log('PASS settings');
+
+  // Sound comes back after the app was in the background (iOS can leave a silent "running" context):
+  // the first tap afterwards builds a fresh AudioContext.
+  await page.waitForFunction(() => window.__dropcat.state().audio === 'running');
+  const gen0 = await page.evaluate(() => window.__dropcat.state().audioGen);
+  await page.evaluate(() => {
+    const set = (v) => {
+      Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => v });
+      document.dispatchEvent(new Event('visibilitychange'));
+    };
+    set('hidden');
+    set('visible');
+  });
+  await page.locator('#btn-settings-game').click({ force: true });
+  await page.locator('#settings.open').waitFor();
+  await page.waitForFunction((g) => {
+    const st = window.__dropcat.state();
+    return st.audioGen === g + 1 && st.audio === 'running';
+  }, gen0);
+  await page.locator('#btn-settings-close').click({ force: true });
+  await page.locator('#settings').waitFor({ state: 'hidden' });
+  assert.equal(await page.evaluate(() => window.__dropcat.state().audioGen), gen0 + 1, 'one rebuild, not one per tap');
+  console.log('PASS sound restarts after the app was in the background');
   await context.close();
 
   // Save & resume: a move survives a reload.

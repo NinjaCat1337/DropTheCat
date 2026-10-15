@@ -1,6 +1,6 @@
 // App controller: screens (home, game, overlays), pointer input on the board, undo / restart / boosters,
 // saving, sounds and haptics. The rules live in core/rules.js, the drawing in scene.js and art.js.
-import { Game } from '../core/rules.js';
+import { Game, WALL, LOCK } from '../core/rules.js';
 import { getLevel, isHardLevel } from '../core/levels.js';
 import { hint as findHint } from '../core/solver.js';
 import {
@@ -654,7 +654,7 @@ export function createApp({ root, nosave = false, debug = false, firstLevel = nu
     if (k < 0) {
       const cx = Math.floor(c.x);
       const cy = Math.floor(c.y);
-      if (cx >= 0 && cy >= 0 && cx < game.w && cy < game.h && game.catAt(cx, cy) !== -1) {
+      if (cx >= 0 && cy >= 0 && cx < game.w && cy < game.h) {
         tapCat = { x: cx, y: cy, id: e.pointerId };
       }
       return;
@@ -725,11 +725,7 @@ export function createApp({ root, nosave = false, debug = false, firstLevel = nu
     if (tapCat && e.pointerId === tapCat.id) {
       const { x, y } = tapCat;
       tapCat = null;
-      if (game && game.catAt(x, y) !== -1 && !game.isBoxed(x, y)) {
-        scene.hop(x, y, now());
-        audio.play('meow', { pitch: 0.8 + ((x * 7 + y * 3) % 9) * 0.06 });
-        haptics.tick();
-      }
+      if (game) explainCell(x, y);
     }
     if (drag && e.pointerId === drag.id) {
       const p = point(e);
@@ -739,6 +735,42 @@ export function createApp({ root, nosave = false, debug = false, firstLevel = nu
       finishDrag();
     }
     flushHaptic();
+  }
+
+  // A tap on the board: cats meow, and anything special explains itself in a short tip.
+  function explainCell(x, y) {
+    const name = (c) => PALETTE[c].name;
+    const say = (text) => showTip(text, { ms: 3800 });
+    if (game.catAt(x, y) !== -1) {
+      if (game.isBoxed(x, y)) {
+        audio.play('click');
+        say('A box with a cat inside: it opens when a cat next to it drops');
+        return;
+      }
+      scene.hop(x, y, now());
+      audio.play('meow', { pitch: 0.8 + ((x * 7 + y * 3) % 9) * 0.06 });
+      haptics.tick();
+      const ice = game.iceAt(x, y);
+      const hunger = game.hungerAt(x, y);
+      if (ice > 0) say(`Frozen: it thaws after ${ice} more cat${ice > 1 ? 's' : ''} drop`);
+      else if (hunger !== null) say(`Hungry: drop it within ${Math.max(0, hunger)} move${hunger === 1 ? '' : 's'}`);
+      else if (game.hasKey(x, y)) say('This cat has the key: drop it to open the crates');
+      return;
+    }
+    const gate = game.gateAt(x, y);
+    if (gate !== -1) {
+      audio.play('click');
+      say(`A ${name(gate)} gate: only the ${name(gate)} hole can pass here, every other hole is blocked`);
+      return;
+    }
+    const ground = game.ground(x, y);
+    if (ground === WALL) {
+      audio.play('click');
+      say('A wall: no hole can pass here');
+    } else if (ground === LOCK) {
+      audio.play('click');
+      say('A locked crate: drop the cat with the key to open it');
+    }
   }
 
   function onCancel(e) {
@@ -1189,7 +1221,7 @@ export function createApp({ root, nosave = false, debug = false, firstLevel = nu
     state() {
       return {
         screen, level: levelNo, won, undo: undo.length, coins: progress.coins, boosters: { ...progress.boosters },
-        audio: audio.state, catsLeft: game ? game.catsLeft() : 0, stuck: game ? game.isStuck() : false,
+        audio: audio.state, audioGen: audio.generation, catsLeft: game ? game.catsLeft() : 0, stuck: game ? game.isStuck() : false,
         overlay: OVERLAYS.filter((id) => $(id).dataset.open === '1'),
         moves: game ? game.moves : 0, stars: totalStars(progress), failed: game ? game.isFailed() : false,
         par: def ? def.par : undefined, lastWin,

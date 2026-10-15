@@ -429,6 +429,13 @@ export function createAudio() {
   let primed = false;
   let unlockedAt = -Infinity;
   let resumeSince = 0;
+  // iOS can leave a context that reports 'running' but plays nothing (after the app was in the background, a
+  // call, Siri, another app's audio…). Such a context is rebuilt at the next gesture: `stale` marks the known
+  // causes, and a running context whose clock stands still is caught by the probe.
+  let stale = false;
+  let generation = 0;
+  let probeWall = 0;
+  let probeAudio = 0;
   const lastStart = Object.create(null);
   const hasWindow = typeof window !== 'undefined';
   const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
@@ -443,6 +450,21 @@ export function createAudio() {
     } catch {
       // not supported
     }
+  };
+
+  const probe = () => {
+    if (!ctx) return;
+    probeWall = now();
+    probeAudio = ctx.currentTime;
+  };
+
+  // True when the context claims to run but its clock barely moved since the last probe.
+  const stalled = () => {
+    if (!ctx || ctx.state !== 'running') return false;
+    const dw = (now() - probeWall) / 1000;
+    const da = ctx.currentTime - probeAudio;
+    probe();
+    return dw > 0.5 && da < dw * 0.25;
   };
 
   const create = () => {
@@ -461,6 +483,18 @@ export function createAudio() {
     bus = createMasterBus(ctx);
     primed = false;
     resumeSince = 0;
+    generation++;
+    const c = ctx;
+    try {
+      c.onstatechange = () => {
+        if (ctx !== c) return;
+        probe();
+        if (c.state === 'interrupted') stale = true;
+      };
+    } catch {
+      // ignore
+    }
+    probe();
     return true;
   };
 
@@ -487,14 +521,16 @@ export function createAudio() {
     try {
       if (muted) return;
       setSession();
-      if (ctx && (ctx.state === 'closed' || (ctx.state !== 'running' && resumeSince && now() - resumeSince > STUCK_MS))) {
+      const stuck = ctx && ctx.state !== 'running' && resumeSince && now() - resumeSince > STUCK_MS;
+      if (ctx && (stale || ctx.state === 'closed' || stuck || stalled())) {
         try {
-          quiet(ctx.close()); // stuck after an interruption: start over (we are inside a gesture)
+          quiet(ctx.close()); // dead or stuck after an interruption: start over (we are inside a gesture)
         } catch {
           // ignore
         }
         ctx = null;
       }
+      stale = false;
       if (!ctx && !create()) return;
       unlockedAt = now();
       resume();
@@ -570,8 +606,18 @@ export function createAudio() {
         window.addEventListener(type, unlock, { capture: true, passive: true });
       }
       document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible' && ctx && !muted) resume();
+        if (document.visibilityState === 'hidden') stale = true;
+        else if (ctx && !muted) resume();
       });
+      window.addEventListener('pagehide', () => {
+        stale = true;
+      });
+      const session = navigator.audioSession;
+      if (session && typeof session.addEventListener === 'function') {
+        session.addEventListener('statechange', () => {
+          if (session.state === 'interrupted') stale = true;
+        });
+      }
     } catch {
       // ignore
     }
@@ -591,6 +637,10 @@ export function createAudio() {
     /** 'none' before the first unlock, else the AudioContext state. */
     get state() {
       return ctx ? ctx.state : 'none';
+    },
+    /** How many AudioContexts were created so far (diagnostics: rebuilds after interruptions). */
+    get generation() {
+      return generation;
     },
   };
 }
